@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strata 助手</title>
+<style>
+:root{
+  --bg:#0f1115; --bg2:#161a21; --bg3:#1d222b; --line:#2a313d;
+  --fg:#e6e9ef; --fg2:#9aa4b2; --fg3:#6b7684;
+  --accent:#5b9dff; --accent2:#3d7de0;
+  --ok:#3ecf8e; --warn:#f0b429; --err:#ef5350;
+  --think:#8b7bd8;
+  /* ★ 用户（问）气泡 —— 主题色淡化版；深浅两套，别只调一套 */
+  --ubub:rgba(91,157,255,.16); --ubub-line:rgba(91,157,255,.42);
+  /* ★ 「需要你动手」的提示条（球念失败等） */
+  --errbg:#3a1a1a; --errfg:#ffb4b4;
+}
+[data-theme="light"]{
+  --bg:#f6f7f9; --bg2:#ffffff; --bg3:#eef0f4; --line:#dde1e7;
+  --fg:#1a1d23; --fg2:#5a6472; --fg3:#8993a1;
+  /* 浅色下同色系要加深一档，否则和卡片白底分不出来 */
+  --ubub:rgba(61,125,224,.16); --ubub-line:rgba(61,125,224,.40);
+  --errbg:#fdecec; --errfg:#9d1f1f;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font:15px/1.65 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  display:flex; flex-direction:column; overflow:hidden;
+}
+button,input,textarea{font:inherit;color:inherit}
+
+/* ================= 顶栏 ================= */
+.top{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap; flex:none;
+  padding:9px 16px; background:var(--bg2); border-bottom:1px solid var(--line);
+}
+.logo{font-weight:700; font-size:16px; letter-spacing:.5px}
+.logo span{color:var(--accent)}
+.pill{
+  display:inline-flex; align-items:center; gap:7px; padding:4px 13px;
+  border-radius:20px; background:var(--bg3); border:1px solid var(--line);
+  font-size:12.5px; color:var(--fg2); white-space:nowrap;
+}
+.pill .d{width:8px;height:8px;border-radius:50%;background:var(--fg3)}
+.pill[data-s="ok"] .d{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+.pill[data-s="busy"] .d{background:var(--warn);animation:pulse 1s infinite}
+.pill[data-s="err"] .d{background:var(--err)}
+@keyframes pulse{50%{opacity:.3}}
+.spacer{flex:1}
+.gears{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.gear{
+  padding:5px 13px; background:var(--bg3); border:0; cursor:pointer;
+  font-size:13px; color:var(--fg2); border-right:1px solid var(--line);
+}
+.gear:last-child{border-right:0}
+.gear[aria-pressed="true"]{background:var(--accent); color:#fff; font-weight:600}
+.gear:hover:not([aria-pressed="true"]){background:var(--line); color:var(--fg)}
+.icon-btn{
+  background:var(--bg3); border:1px solid var(--line); border-radius:8px;
+  width:32px;height:32px; cursor:pointer; display:grid; place-items:center; flex:none;
+}
+.icon-btn:hover{background:var(--line)}
+/* ★ 自动朗读三态按钮（不念/网页念/球念）—— 要放下三个字，所以宽度自适应 */
+.icon-btn.wide{width:auto; min-width:56px; padding:0 9px; font-size:12px; white-space:nowrap}
+
+/* ================= 左侧：最近会话 ================= */
+.side{
+  flex:none; width:206px; background:var(--bg2);
+  border-right:1px solid var(--line); overflow-y:auto; padding:9px 8px;
+  transition:width .18s, padding .18s;
+}
+.side.fold{width:0; padding:0; overflow:hidden; border-right:0}
+.side .sh{
+  display:flex; align-items:center; justify-content:space-between;
+  font-size:12px; font-weight:700; color:var(--fg3); letter-spacing:.5px;
+  margin:0 2px 7px;
+}
+.side .newb{
+  background:var(--accent); color:#fff; border:0; border-radius:7px;
+  padding:2px 9px; font-size:12px; cursor:pointer; font-weight:600;
+}
+.side .newb:hover{background:var(--accent2)}
+.sess{
+  padding:6px 9px; border-radius:8px; cursor:pointer; margin-bottom:3px;
+  border:1px solid transparent;
+}
+.sess:hover{background:var(--bg3)}
+.sess[data-on="1"]{background:var(--bg3); border-color:var(--accent)}
+.sess .t{font-size:13px; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.sess[data-on="0"] .t{color:var(--fg2)}
+.sess .m{font-size:11px; color:var(--fg3); display:flex; justify-content:space-between; gap:6px; margin-top:1px}
+.sess .del{opacity:0; cursor:pointer; color:var(--err); padding:0 2px}
+.sess:hover .del{opacity:1}
+.side .none{font-size:12px;color:var(--fg3);text-align:center;padding:14px 0}
+@media (max-width:1200px){ .side{width:172px} }
+@media (max-width:980px){ .side{display:none} }
+
+/* 附件 */
+.attach-box{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:7px}
+.chip{
+  display:inline-flex;align-items:center;gap:5px;font-size:11.5px;
+  background:var(--bg3);border:1px solid var(--line);border-radius:14px;padding:2px 9px;
+  color:var(--fg2);max-width:220px;
+}
+.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip b{cursor:pointer;color:var(--err);font-weight:400}
+.crow .ib{
+  background:none;border:0;cursor:pointer;font-size:16px;color:var(--fg3);
+  padding:2px 5px;border-radius:6px;line-height:1;
+}
+.crow .ib:hover{background:var(--bg3);color:var(--fg)}
+.crow .ib.rec{color:var(--err);animation:pulse 1s infinite}
+
+/* ================= 图标（内联 SVG sprite，线条 · currentColor） =================
+   以前用 emoji（花花绿绿、粗细不一、跨机器渲染还不一样），
+   现在统一走这里的符号：无 fill、stroke:currentColor，颜色随按钮变色。 */
+/* display:none 在个别浏览器下会让 <use> 解析异常，故用尺寸收掉 */
+.ic-sprite{position:absolute;width:0;height:0;overflow:hidden}
+/* ★ fill:none + stroke:currentColor 必须显式写：
+   内联 SVG 的默认值是 fill:#000 / stroke:none，光靠继承会画成【黑块】 */
+.ic{width:16px;height:16px;flex:none;display:block;pointer-events:none;
+    fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.ib .ic{width:17px;height:17px}
+
+/* ================= 每条回答的操作条（朗读 · 复制 · 分享） ================= */
+/* 刻意做得淡：不抢正文注意力，鼠标移到这条回答上才明显 */
+.acts{display:flex;gap:4px;margin-top:9px;opacity:.5;transition:opacity .15s}
+.msg:hover .acts,.acts:focus-within{opacity:1}
+.ab{
+  display:inline-flex;align-items:center;gap:5px;
+  background:none;border:1px solid transparent;border-radius:7px;
+  padding:3px 8px;font-size:12px;line-height:1.5;color:var(--fg3);
+  cursor:pointer;white-space:nowrap;
+}
+.ab:hover{background:var(--bg3);border-color:var(--line);color:var(--fg)}
+.ab.busy{color:var(--accent);opacity:.85;cursor:progress}
+.ab.on{color:var(--accent);border-color:var(--accent)}
+.ab.ok{color:var(--ok);border-color:var(--ok)}
+.ab.err{color:var(--err);border-color:var(--err)}
+.raw{display:none}
+
+/* ================= ★ 球念失败等「要你动手」的提示条 =================
+   贴在出问题的那条回答的操作条下面 —— 状态栏在输入框旁边，用户容易看不到 */
+.tip{
+  display:flex; align-items:flex-start; flex-wrap:wrap; gap:8px;
+  margin-top:8px; padding:8px 11px; border-radius:9px;
+  font-size:12.5px; line-height:1.6;
+  background:var(--errbg); border:1px solid var(--err); color:var(--errfg);
+}
+.tip .tx{flex:1; min-width:180px}
+.tip button{
+  background:none; border:1px solid currentColor; color:inherit; border-radius:7px;
+  padding:2px 9px; font-size:12px; line-height:1.7; cursor:pointer; white-space:nowrap;
+}
+.tip button:hover{opacity:.72}
+.tip .tipx{padding:2px 8px; font-weight:700}
+
+/* ================= 主体 ================= */
+.main{flex:1; display:flex; min-height:0}
+.chat{flex:1; display:flex; flex-direction:column; min-width:0}
+
+/* 消息 */
+.scroll{flex:1; overflow-y:auto; padding:22px 16px 8px}
+.wrap{max-width:780px; margin:0 auto}
+.msg{margin-bottom:22px; display:flex; gap:12px}
+.msg .who{
+  flex:none; width:32px;height:32px; border-radius:8px; display:grid; place-items:center;
+  font-size:12px; font-weight:700;
+}
+.msg.a .who{background:var(--accent); color:#fff}
+/* ★ 用户（问）一侧的头像：主题色【淡化版】+ 主题色文字，和 AI 的实心蓝一眼分得开 */
+.msg.u .who{background:var(--ubub); color:var(--accent); border:1px solid var(--ubub-line)}
+.msg .bd{flex:1; min-width:0}
+.role{font-size:12px; color:var(--fg3); margin-bottom:5px}
+.content{white-space:pre-wrap; word-wrap:break-word}
+
+/* ================= ★ 用户消息靠右（聊天软件惯例：自己在右、对方在左） =================
+   · .msg.u 用 row-reverse 只换【头像和气泡】的左右顺序，DOM 结构不动（JS 不用改）
+   · .bd 从 flex:1 改成「按内容收窄 + 上限 82%」，气泡才贴得住右边
+   · 规则一律带 .msg.u 前缀 —— AI 那一侧（思考过程 / 元信息 / 操作条）完全不受影响 */
+.msg.u{flex-direction:row-reverse}
+/* ：去掉用户消息那侧的「问」标签（头像 + 角色名都不要）。
+   理由：聊天软件里自己发的消息通常不带头像和名字，去掉更干净。
+   ★ 想还原：把下面两条 display:none 删掉即可。 */
+/* 更正：用户要【保留蓝色头像】，只去掉灰色那行角色名。
+   （上一版把头像也藏了，用户纠正） */
+.msg.u .role{display:none}
+.msg.u .bd{max-width:82%}
+
+.msg.u .bd{flex:0 1 auto; max-width:82%; display:flex; flex-direction:column; align-items:flex-end}
+.msg.u .role{text-align:right}
+.msg.u .content{
+  background:var(--ubub); border:1px solid var(--ubub-line);
+  border-radius:11px; padding:8px 12px;
+  /* ★ max-width:100% 不能省：flex 列里的子项按 max-content 定宽，
+     长中文/长串会把气泡撑出容器（实测 1959px）—— 加了它才会老实换行 */
+  max-width:100%;
+}
+.content code{background:var(--bg3); padding:1px 5px; border-radius:4px; font:13px/1.5 ui-monospace,Consolas,monospace}
+.content pre{background:var(--bg3); padding:12px 14px; border-radius:9px; overflow-x:auto; border:1px solid var(--line); margin:8px 0}
+.content pre code{background:none;padding:0}
+.content .tex{
+  background:var(--bg3); border-left:3px solid var(--think); padding:6px 10px;
+  margin:6px 0; font:13px/1.6 ui-monospace,Consolas,monospace;
+  color:var(--think); white-space:pre-wrap; overflow-x:auto;
+}
+.think{margin:0 0 10px; border:1px solid var(--line); border-radius:9px; overflow:hidden}
+.think>summary{cursor:pointer;padding:7px 12px;background:var(--bg3);font-size:12.5px;color:var(--think);user-select:none;list-style:none}
+.think>summary::-webkit-details-marker{display:none}
+.think>summary::before{content:"▸ "}
+.think[open]>summary::before{content:"▾ "}
+.think .tk{padding:10px 12px;font-size:13px;color:var(--fg2);white-space:pre-wrap;max-height:300px;overflow-y:auto;border-top:1px solid var(--line)}
+.meta{margin-top:8px;display:flex;gap:13px;flex-wrap:wrap;font-size:12px;color:var(--fg3);border-top:1px dashed var(--line);padding-top:7px}
+.meta b{color:var(--fg2);font-weight:600}
+.tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;background:var(--bg3);border:1px solid var(--line)}
+.tag.direct{color:var(--ok);border-color:var(--ok)}
+.tag.think{color:var(--think);border-color:var(--think)}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+.err-box{background:#3a1a1a;border:1px solid var(--err);color:#ffb4b4;padding:10px 12px;border-radius:9px;font-size:13px}
+.empty{text-align:center; padding:60px 20px; color:var(--fg3)}
+.empty h2{font-size:20px;color:var(--fg2);font-weight:600;margin:0 0 8px}
+.quick{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:20px}
+.quick button{background:var(--bg2);border:1px solid var(--line);border-radius:20px;padding:7px 15px;cursor:pointer;font-size:13px;color:var(--fg2)}
+.quick button:hover{border-color:var(--accent);color:var(--fg)}
+
+/* 输入区 */
+.composer{padding:10px 16px 14px; flex:none}
+.cbox{
+  max-width:780px; margin:0 auto; background:var(--bg2);
+  border:1px solid var(--line); border-radius:14px; padding:10px 10px 8px 14px;
+}
+.cbox:focus-within{border-color:var(--accent)}
+#input{width:100%;background:none;border:0;outline:none;resize:none;max-height:180px;min-height:26px;padding:0;line-height:1.6}
+.crow{display:flex;align-items:center;gap:10px;margin-top:6px}
+.crow .hint2{font-size:11.5px;color:var(--fg3);flex:1}
+.send{
+  background:var(--accent); color:#fff; border:0; border-radius:10px;
+  padding:7px 18px; cursor:pointer; font-weight:600;
+}
+.send:disabled{background:var(--bg3);color:var(--fg3);cursor:default}
+.send.stop{background:var(--err)}
+
+/* ================= 右侧监控侧边栏 ================= */
+.aside{
+  flex:none; width:286px; background:var(--bg2);
+  border-left:1px solid var(--line); overflow-y:auto; padding:9px 9px 16px;
+  transition:width .18s, padding .18s;
+}
+.aside.fold{width:0; padding:0; overflow:hidden; border-left:0}
+/* 分组标题已并入卡片内，这里只留极窄的分隔 */
+.sep{
+  font-size:12px; font-weight:700; color:var(--fg3); letter-spacing:.5px;
+  margin:10px 2px 5px;
+}
+.sep:first-child{margin-top:2px}
+.card{background:var(--bg); border:1px solid var(--line); border-radius:9px; padding:8px 10px; margin-bottom:7px}
+.card .hd{
+  display:flex; align-items:center; justify-content:space-between;
+  font-size:12.5px; color:var(--fg3); margin-bottom:5px;
+}
+.card .hd b{color:var(--fg2); font-weight:600}
+.big{font-size:26px; font-weight:700; line-height:1.12; letter-spacing:-.5px}
+.big small{font-size:13px; font-weight:500; color:var(--fg3); margin-left:3px}
+.sub{font-size:11.5px; color:var(--fg3); margin-top:1px; line-height:1.5}
+.rowline{display:flex; justify-content:space-between; font-size:12.5px; color:var(--fg2); padding:1px 0}
+.rowline span:last-child{color:var(--fg); font-weight:600}
+.bar{height:6px;border-radius:3px;background:var(--bg3);overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .35s}
+.bar.think i{background:var(--think)}
+.bar.ram i{background:var(--ok)}
+.bar.ram[data-hi="1"] i{background:var(--warn)}
+.bar.ram[data-hi="2"] i{background:var(--err)}
+/* 状态机 */
+.states{display:flex; flex-wrap:wrap; gap:4px}
+.st{
+  font-size:11.5px; padding:2px 8px; border-radius:14px;
+  background:var(--bg3); color:var(--fg3); border:1px solid var(--line);
+}
+.st[data-on="1"]{background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600}
+.st[data-on="1"][data-k="err"]{background:var(--err); border-color:var(--err)}
+/* 圆环 */
+.ring-wrap{display:flex; align-items:center; gap:12px}
+.ring{transform:rotate(-90deg)}
+.ring circle{fill:none; stroke-width:9}
+.ring .bgc{stroke:var(--bg3)}
+.ring .fgc{stroke:var(--accent); stroke-linecap:round; transition:stroke-dashoffset .4s}
+.ring-txt{font-size:22px;font-weight:700}
+/* 两列并排（省纵向空间） */
+.duo{display:flex; gap:7px}
+.duo>*{flex:1; min-width:0}
+/* 请求历史 */
+table.req{width:100%; border-collapse:collapse; font-size:11.5px}
+table.req th{text-align:left;color:var(--fg3);font-weight:600;padding:2px 3px;border-bottom:1px solid var(--line)}
+table.req td{padding:2px 3px;border-bottom:1px solid var(--bg3);color:var(--fg2)}
+table.req td.n{color:var(--fg);font-weight:600}
+.tex-wrap{position:relative}
+@media (max-width:1100px){ .aside{width:262px} }
+@media (max-width:900px){ .aside{display:none} }
+</style>
+</head>
+<body>
+
+<!-- ★ 图标库：只定义一次，下面所有图标按钮都用 <use href="#i-*"> 引用
+     · 16x16 网格 · fill:none · stroke:currentColor（颜色永远跟着按钮走，不硬编码） -->
+<svg class="ic-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-speak" viewBox="0 0 16 16"><path d="M2.5 6.2h2.7L8.6 3.4v9.2L5.2 9.8H2.5z"/><path d="M11 6.3a2.6 2.6 0 0 1 0 3.4"/><path d="M13 4.7a5.2 5.2 0 0 1 0 6.6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1.2"/></symbol>
+  <symbol id="i-wait" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5" stroke-dasharray="3 3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.8" y="5.8" width="7.4" height="7.4" rx="1.4"/><path d="M10.4 3.2H4.2a1.4 1.4 0 0 0-1.4 1.4v6.2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.4 8.4l3.1 3.1 6.1-6.6"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.6v7.4"/><path d="M5 7.2L8 10.2l3-3"/><path d="M3.2 12.8h9.6"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 16 16"><path d="M11.6 7.4l-4.1 4.1a2.5 2.5 0 0 1-3.5-3.5l5-5a1.7 1.7 0 0 1 2.4 2.4l-5 5a.9.9 0 0 1-1.2-1.2l4.4-4.4"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 16 16"><rect x="6.1" y="2.2" width="3.8" height="6.8" rx="1.9"/><path d="M4 8.2a4 4 0 0 0 8 0"/><path d="M8 12.2v1.7"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 16 16"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6"/><path d="M6.6 3.2v9.6"/></symbol>
+  <symbol id="i-fold" viewBox="0 0 16 16"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6"/><path d="M9.4 3.2v9.6"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M8 2.4a5.6 5.6 0 0 0 0 11.2z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8"/><path d="M12 4l-8 8"/></symbol>
+</svg>
+
+<div class="top">
+  <span class="logo">Strata <span>助手</span></span>
+  <span class="pill" id="pill" data-s=""><span class="d"></span><span id="pillText">连接中…</span></span>
+  <span class="spacer"></span>
+  <div class="gears" role="group" aria-label="思考档位">
+    <button class="gear" data-g="auto"   aria-pressed="true">自动</button>
+    <button class="gear" data-g="direct" aria-pressed="false">直答</button>
+    <button class="gear" data-g="think"  aria-pressed="false">该想</button>
+  </div>
+  <span class="gear-hint" id="gearHint" style="font-size:11.5px;color:var(--fg3);max-width:200px">按问题类型选档</span>
+  <button class="icon-btn wide" id="autoSpeak" title="自动朗读：关（点一下 -> 网页念）">不念</button>
+  <button class="icon-btn" id="foldL" title="收起/展开会话列表"><svg class="ic"><use href="#i-panel"/></svg></button>
+  <button class="icon-btn" id="fold" title="收起/展开监控"><svg class="ic"><use href="#i-fold"/></svg></button>
+  <button class="icon-btn" id="theme" title="切换明暗"><svg class="ic"><use href="#i-theme"/></svg></button>
+  <button class="icon-btn" id="clear" title="删除当前会话"><svg class="ic"><use href="#i-x"/></svg></button>
+</div>
+
+<div class="main">
+  <!-- ============ 左侧：最近会话 ============ -->
+  <aside class="side" id="side">
+    <div class="sh"><span>最近会话</span><button class="newb" id="newSess">＋ 新建</button></div>
+    <div id="sessList"><div class="none">还没有会话</div></div>
+  </aside>
+
+  <!-- ============ 对话 ============ -->
+  <div class="chat">
+    <div class="scroll" id="scroll">
+      <div class="wrap" id="wrap">
+        <div class="empty" id="empty">
+          <h2>本机模型，数据不出这台电脑</h2>
+          <div>直答类不跑推理（快）；该想类才推理（慢但更准）</div>
+          <div class="quick">
+            <button data-q="把「你好世界」翻译成英文">翻译一句</button>
+            <button data-q="HTTP 状态码 503 是什么意思？">查个定义</button>
+            <button data-q="为什么天空是蓝色的？请解释机制">解释原理</button>
+            <button data-q="这段 Python 为什么报错？def f(a,b=[]): b.append(a); return b">调段代码</button>
+            <button data-q="帮我权衡一下：现在该不该把单体拆成微服务？">帮我权衡</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="cbox">
+        <div class="attach-box" id="attachBox" hidden></div>
+        <textarea id="input" rows="1" placeholder="说点什么…"></textarea>
+        <div class="crow">
+          <button class="ib" id="attach" title="上传文本文件（图片不支持 —— 模型只收文本）"><svg class="ic"><use href="#i-clip"/></svg></button>
+          <button class="ib" id="mic" title="按住说话（本地 whisper 转写）"><svg class="ic"><use href="#i-mic"/></svg></button>
+          <input type="file" id="file" multiple hidden
+                 accept=".txt,.md,.json,.py,.js,.ts,.log,.csv,.yaml,.yml,.xml,.html,.css,.bat,.ps1,.sh,.ini,.toml,.sql,.java,.c,.cpp,.h,.go,.rs">
+          <span class="hint2" id="recHint">Enter 发送 · Shift+Enter 换行<span id="stat"></span></span>
+          <button class="send" id="send" disabled>发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 监控侧边栏 ============ -->
+  <aside class="aside" id="aside">
+
+    <!-- 状态（含实时进度） -->
+    <div class="card">
+      <div class="hd"><b>模型状态</b><span id="stateMsg">等待请求</span></div>
+      <div class="states" id="states">
+        <span class="st" data-k="idle"  data-on="1">空闲</span>
+        <span class="st" data-k="read">读取</span>
+        <span class="st" data-k="gen">生成中</span>
+        <span class="st" data-k="queue">排队</span>
+        <span class="st" data-k="err">错误</span>
+      </div>
+      <div class="bar think"><i id="genBar"></i></div>
+      <div class="sub" id="genTxt">—</div>
+    </div>
+
+    <!-- 速度 -->
+    <div class="card">
+      <div class="hd"><b>速度</b><span id="spdSub">上一轮解码</span></div>
+      <div class="big" id="spd">—<small>tok/s</small></div>
+      <div class="rowline"><span>预填充</span><span id="prefill">—</span></div>
+      <div class="rowline"><span>投机命中</span><span id="draft">—</span></div>
+    </div>
+
+    <!-- 上下文 + 内存 并排 -->
+    <div class="duo">
+      <div class="card">
+        <div class="hd"><b>上下文</b></div>
+        <div class="ring-wrap" style="gap:9px">
+          <svg class="ring" width="66" height="66" viewBox="0 0 86 86">
+            <circle class="bgc" cx="43" cy="43" r="36"/>
+            <circle class="fgc" id="ring" cx="43" cy="43" r="36"
+                    stroke-dasharray="226" stroke-dashoffset="226"/>
+          </svg>
+          <div>
+            <div class="ring-txt" id="ctxPct" style="font-size:18px">—</div>
+            <div class="sub" id="ctxTxt">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd"><b>内存</b></div>
+        <div class="big" id="ram" style="font-size:22px">—<small>GB</small></div>
+        <div class="sub" id="ramSub">系统物理内存</div>
+        <div class="bar ram" id="ramBar"><i id="ramFill"></i></div>
+      </div>
+    </div>
+
+    <!-- CPU + 磁盘 并排 -->
+    <div class="duo">
+      <div class="card">
+        <div class="hd"><b>CPU</b></div>
+        <div class="big" id="cpu" style="font-size:22px">—<small>%</small></div>
+        <div class="sub" id="cpuSub">8 核 · 16 线程</div>
+        <div class="bar"><i id="cpuFill"></i></div>
+      </div>
+      <div class="card">
+        <div class="hd"><b>磁盘</b></div>
+        <div class="big" id="disk" style="font-size:22px">—<small>MB/s</small></div>
+        <div class="sub" id="diskSub">读 / 写</div>
+      </div>
+    </div>
+
+    <!-- 专家缓存 + PCIe 并排 -->
+    <div class="duo">
+      <div class="card">
+        <div class="hd"><b>专家缓存</b></div>
+        <div class="big" id="slots" style="font-size:22px">—</div>
+        <div class="sub" id="slotsSub">个已缓存</div>
+      </div>
+      <div class="card">
+        <div class="hd"><b>PCIe 占比</b></div>
+        <div class="big" id="pcie" style="font-size:22px">—<small>%</small></div>
+        <div class="sub" id="pcieSub">专家走总线的比例</div>
+      </div>
+    </div>
+
+    <!-- 运行 -->
+    <div class="card">
+      <div class="hd"><b>运行</b><span id="uptime">—</span></div>
+      <div class="rowline"><span>累计请求</span><span id="reqN">—</span></div>
+      <div class="rowline"><span>输出 tokens</span><span id="outTok">—</span></div>
+      <div class="rowline"><span>累计投机命中</span><span id="draftAll">—</span></div>
+      <div class="rowline"><span>处理中 / 并发</span><span id="conc">—</span></div>
+    </div>
+
+    <!-- 最近请求 -->
+    <div class="card">
+      <div class="hd"><b>最近请求</b><span>本页记录</span></div>
+      <table class="req">
+        <thead><tr><th>时间</th><th>输出</th><th>速度</th><th>用时</th></tr></thead>
+        <tbody id="reqBody"><tr><td colspan="4" class="sub">还没有记录</td></tr></tbody>
+      </table>
+    </div>
+
+  </aside>
+</div>
+
+<script>
+/* ==========================================================================
+   Strata 助手 v2
+   · 学自带 UI 的：状态机 / 指标卡 / 上下文圆环 / 请求历史
+   · 保留自己的特色：直答 vs 该想 档位，且每次都告诉你判据
+   · 监控改成【右侧侧边栏】，边聊边看
+   ========================================================================== */
+const $ = s => document.querySelector(s);
+const scrollEl = $("#scroll"), wrapEl = $("#wrap");
+
+/* ---------- 会话模型 ---------- */
+const LS_KEY = "strata_sessions";
+let sessions = [];          // [{id, title, ts, msgs:[{role,content}]}]
+let curId = null;
+let gear = localStorage.getItem("strata_gear") || "auto";
+let ctrl = null;
+
+function cur(){ return sessions.find(s => s.id === curId) || null; }
+function curMsgs(){ const c = cur(); return c ? c.msgs : []; }
+
+/* ★ 发给模型的 messages：附件正文在内存里叫 wire（不落盘），这里换回来。
+   注意别把 wire/files 直接发给服务端 —— 只发 role/content(+原有元信息)。 */
+function apiMsgs(S){
+  return (S.msgs||[]).map(m=>{
+    const o = Object.assign({}, m);
+    if(o.wire != null) o.content = o.wire;
+    delete o.wire;
+    delete o.files;
+    return o;
+  });
+}
+
+/* ---------- 提示条（★ 重要-10：数据被丢 / 存不下，必须让人看见）---------- */
+let _noticeTimer = null;
+function notify(text){
+  let el = document.getElementById("notice");
+  if(!el){
+    el = document.createElement("div");
+    el.id = "notice";
+    el.style.cssText = "margin:0 0 8px;padding:8px 12px;border-radius:8px;font-size:13px;"+
+      "line-height:1.5;display:flex;gap:10px;align-items:flex-start;"+
+      "background:rgba(120,80,10,.18);color:#e8b463;border:1px solid rgba(232,180,99,.45)";
+    el.innerHTML = '<span class="nt"></span><b style="cursor:pointer;margin-left:auto;opacity:.75">×</b>';
+    el.querySelector("b").onclick = ()=>{ el.remove(); };
+    if(scrollEl) scrollEl.prepend(el); else document.body.prepend(el);
+  }
+  el.querySelector(".nt").textContent = text;
+  clearTimeout(_noticeTimer);
+  _noticeTimer = setTimeout(()=>{ const x = document.getElementById("notice"); if(x) x.remove(); }, 15000);
+  window.__lastNotice = text;
+  return text;
+}
+
+/* ---------- 落盘 ----------
+   ★★ 重要-10：改造前是一句 `catch(e){}` —— 配额爆了就【静默丢数据】，
+      用户以为会话都存着，其实什么都没写进去（实测配额约 4,980,736 字符）。
+   现在三件事：
+     ① 附件正文不入 localStorage（只留文件名+大小，正文在内存里 wire 字段）
+     ② 失败就丢【最老】的会话再试，并明确告知丢了几条
+     ③ 真的存不下 -> 弹提示条，不装没事
+*/
+const LS_KEEP = 40;               // 最多存 40 个会话（和以前一致）
+let _lsLast = { saved:null, dropped:0, error:null, chars:0 };
+
+function _storable(list){
+  // ★ 附件正文（wire）绝不进 localStorage —— 一轮带附件就是几十万字符，十几轮就爆
+  return list.map(s=>({
+    id:s.id, title:s.title, ts:s.ts,
+    msgs:(s.msgs||[]).map(m=>{ const o=Object.assign({},m); delete o.wire; return o; })
+  }));
+}
+function _trySave(list){
+  const txt = JSON.stringify(_storable(list));
+  localStorage.setItem(LS_KEY, txt);
+  return txt.length;
+}
+
+function saveAll(){
+  let dropped = 0, err = null, chars = 0;
+  for(;;){
+    try{
+      chars = _trySave(sessions.slice(0, LS_KEEP));
+      err = null;
+      break;
+    }catch(e){
+      err = e;
+      if(sessions.length > 1){ sessions.pop(); dropped++; renderSess(); continue; }  // ★ 丢最老的再试
+      break;
+    }
+  }
+  _lsLast = { saved: !err, dropped: dropped, error: err ? String(err.name || err) : null,
+              chars: chars };
+  window.__lsDiag = _lsLast;
+  if(dropped > 0){
+    notify("★ 本地存储快满了：已自动丢掉最老的 " + dropped + " 个会话（界面里也看不到了）。"
+           + (err ? "而且这一轮【还是没存进去】（" + (err.name || err) + "）—— 请先导出要留的会话。"
+                  : "建议把要留的会话【分享/下载】成文件。"));
+  }else if(err){
+    notify("★ 本地存储写不进去（" + (err.name || err) + "）：这一轮会话【没能保存】，"
+           + "刷新页面会丢。请先导出要留的会话。");
+  }
+  return _lsLast;
+}
+function loadAll(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||"[]"); }catch(e){ return []; } }
+
+function newSession(silent){
+  const s = { id:"s"+Date.now()+Math.random().toString(36).slice(2,6),
+              title:"新会话", ts:Date.now(), msgs:[] };
+  sessions.unshift(s); curId = s.id;
+  if(!silent){ wrapEl.innerHTML=""; renderEmpty(); $("#stat").textContent=""; }
+  renderSess(); saveAll();
+  return s;
+}
+function pickSession(id){
+  if(id===curId) return;
+  const s = sessions.find(x=>x.id===id); if(!s) return;
+  curId = id; renderSess(); repaint(); saveAll();
+}
+function delSession(id, ev){
+  if(ev) ev.stopPropagation();
+  const i = sessions.findIndex(x=>x.id===id); if(i<0) return;
+  const wasCur = sessions[i].id===curId;
+  sessions.splice(i,1); saveAll();
+  if(wasCur){
+    if(sessions.length) pickSession(sessions[0].id);
+    else newSession();
+  } else renderSess();
+}
+function renderSess(){
+  const L = $("#sessList");
+  if(!sessions.length){ L.innerHTML='<div class="none">还没有会话</div>'; return; }
+  L.innerHTML = sessions.map(s=>{
+    const n = Math.floor(s.msgs.length/2);
+    return '<div class="sess" data-on="'+(s.id===curId?1:0)+'" data-id="'+s.id+'">'+
+      '<div class="t">'+esc(s.title||"新会话")+'</div>'+
+      '<div class="m"><span>'+n+' 轮 · '+ago(s.ts)+'</span><span class="del" title="删除"><svg class="ic" style="width:13px;height:13px"><use href="#i-x"/></svg></span></div>'+
+      '</div>';
+  }).join("");
+  L.querySelectorAll(".sess").forEach(e=>{
+    e.onclick = ()=>pickSession(e.dataset.id);
+    e.querySelector(".del").onclick = (ev)=>delSession(e.dataset.id, ev);
+  });
+}
+function ago(ts){
+  const d = (Date.now()-ts)/1000;
+  if(d<60) return "刚刚";
+  if(d<3600) return Math.floor(d/60)+" 分钟前";
+  if(d<86400) return Math.floor(d/3600)+" 小时前";
+  return Math.floor(d/86400)+" 天前";
+}
+function repaint(){
+  wrapEl.innerHTML = "";
+  const c = cur();
+  if(!c || !c.msgs.length){ renderEmpty(); return; }
+  c.msgs.forEach(m => addMsg(m.role==="user"?"user":"assistant", m.content,
+                             {ts:m.ts, model:m.model, gear:m.gear, q:m.q, secs:m.secs}));
+}
+function renderEmpty(){
+  wrapEl.innerHTML =
+    '<div class="empty" id="empty"><h2>本机模型，数据不出这台电脑</h2>'+
+    '<div>直答类不跑推理（快）；该想类才推理（慢但更准）</div>'+
+    '<div class="quick">'+
+      '<button data-q="把「你好世界」翻译成英文">翻译一句</button>'+
+      '<button data-q="HTTP 状态码 503 是什么意思？">查个定义</button>'+
+      '<button data-q="为什么天空是蓝色的？请解释机制">解释原理</button>'+
+      '<button data-q="这段 Python 为什么报错？def f(a,b=[]): b.append(a); return b">调段代码</button>'+
+      '<button data-q="帮我权衡一下：现在该不该把单体拆成微服务？">帮我权衡</button>'+
+    '</div></div>';
+  document.querySelectorAll(".quick button").forEach(b=>{
+    b.onclick=()=>{ const i=$("#input"); i.value=b.dataset.q; i.dispatchEvent(new Event("input")); i.focus(); };
+  });
+}
+
+/* ---------- 分类器（与 tools/strata_ask.py 同规则）---------- */
+const DIRECT_HINTS = ["翻译","什么意思","是什么","什么是","定义","谁是","哪一年","哪年",
+  "多少","几号","几点","星期几","拼写","怎么读","全称","缩写","语法","等于多少",
+  "计算结果","的首都","属于哪个","哪个版本"];
+const THINK_HINTS = ["为什么","为何","如何","怎么设计","怎么选","怎么调","怎么样才能",
+  "方案","权衡","取舍","分析","比较","对比","优劣","优缺点","调试","排查","根因",
+  "定位问题","架构","重构","优化","设计一","写一篇","写个","创作","起草","建议",
+  "该不该","评估","评审","计划","步骤","流程","证明","推导","原理","机制","策略",
+  "调度","最省","省钱","哪种","怎么做","怎么办","能不能"];
+const CODE_HINTS = ["def ","class ","import ","Traceback","SELECT ","function ","报错","异常","error","Error","```"];
+
+function classify(q){
+  const s=(q||"").trim(), n=s.length, low=s.toLowerCase();
+  const th=THINK_HINTS.filter(h=>s.includes(h));
+  const dh=DIRECT_HINTS.filter(h=>s.includes(h));
+  const ch=CODE_HINTS.filter(h=>s.includes(h)||low.includes(h.toLowerCase()));
+  if(th.length) return {kind:"think",effort:"high",budget:400,why:"命中该想特征："+th.slice(0,3).join("、")};
+  if(ch.length) return {kind:"think",effort:"high",budget:400,why:"含代码或报错："+ch.slice(0,2).join("、")};
+  if(dh.length&&n<=80) return {kind:"direct",effort:"none",budget:0,why:"命中直答特征："+dh.slice(0,3).join("、")};
+  if(n<=15) return {kind:"direct",effort:"none",budget:0,why:"极短（"+n+" 字），按回执处理"};
+  if(n<=60) return {kind:"think",effort:"medium",budget:300,why:"短（"+n+" 字）但未命中直答特征，中间档"};
+  if(n>=150) return {kind:"think",effort:"high",budget:400,why:"问题较长（"+n+" 字）"};
+  return {kind:"think",effort:"medium",budget:300,why:"未命中明确特征，中间档"};
+}
+
+/* ---------- 档位 ---------- */
+document.querySelectorAll(".gear").forEach(b=>{
+  b.onclick=()=>{
+    gear=b.dataset.g;
+    document.querySelectorAll(".gear").forEach(x=>x.setAttribute("aria-pressed",String(x===b)));
+    $("#gearHint").textContent={auto:"按问题类型选档",direct:"不跑推理（最快）",think:"跑推理（慢，预算 400）"}[gear];
+    localStorage.setItem("strata_gear",gear);
+  };
+});
+document.querySelector('.gear[data-g="'+gear+'"]').click();
+
+/* ---------- 主题 / 折叠 ---------- */
+let theme = localStorage.getItem("strata_theme") || "dark";
+document.documentElement.dataset.theme = theme;
+$("#theme").onclick=()=>{
+  theme = theme==="dark"?"light":"dark";
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("strata_theme",theme);
+};
+if(localStorage.getItem("aside_fold")==="1") $("#aside").classList.add("fold");
+$("#fold").onclick=()=>{
+  const a=$("#aside"); a.classList.toggle("fold");
+  localStorage.setItem("aside_fold", a.classList.contains("fold")?"1":"0");
+};
+if(localStorage.getItem("side_fold")==="1") $("#side").classList.add("fold");
+$("#foldL").onclick=()=>{
+  const s=$("#side"); s.classList.toggle("fold");
+  localStorage.setItem("side_fold", s.classList.contains("fold")?"1":"0");
+};
+$("#newSess").onclick=()=>{ newSession(); $("#input").focus(); };
+$("#clear").onclick=()=>{ if(confirm("删除当前会话？")) delSession(curId); };
+
+/* ==========================================================================
+   监控：只用 /metrics 一个接口（信息最全）
+     live.*      实时（state/phase/generated/max_tokens/tok_s/elapsed_s）
+     hardware.*  cpu / ram / disk
+     engine.*    专家缓存 / PCIe 占比 / 显存
+     totals.*    累计请求 / 输出 tokens / 投机命中
+   ========================================================================== */
+const st = { busy:false, queued:0, phase:"" };
+
+function setState(k, msg){
+  document.querySelectorAll("#states .st").forEach(e=>e.setAttribute("data-on", String(e.dataset.k===k)));
+  if(msg) $("#stateMsg").textContent = msg;
+  const p = $("#pill");
+  p.dataset.s = (k==="err")?"err":(k==="idle"?"ok":"busy");
+  $("#pillText").textContent = {idle:"空闲",read:"读取中",gen:"生成中",queue:"排队",err:"错误"}[k]||k;
+}
+
+async function pollMetrics(){
+  let d;
+  try{
+    const r = await fetch("metrics", {cache:"no-store"});
+    if(!r.ok) throw 0;
+    d = await r.json();
+  }catch(e){
+    setState("err","连不上 Strata"); $("#pillText").textContent = "未连接"; return;
+  }
+
+  const eng = d.engine||{}, live = d.live||{}, hw = d.hardware||{},
+        hs = d.hardware_static||{}, tot = d.totals||{};
+
+  /* ---- 状态机 ---- */
+  const busy = !!live.generated || (live.state && live.state!=="idle");
+  st.busy = busy; st.queued = live.queued||0; st.phase = live.phase||"";
+  if(busy){
+    const ph = (live.phase||"").toLowerCase();
+    if(ph.includes("read")||ph.includes("prompt")||ph.includes("prefill"))
+      setState("read","读取提示词 "+(live.prompt_read!=null?live.prompt_read+"/"+(live.prompt_total||"?"):""));
+    else setState("gen","生成答案中");
+  } else if(st.queued>0) setState("queue", st.queued+" 个排队");
+  else if(live.state==="error") setState("err","出错");
+  else setState("idle","等待请求");
+
+  /* ---- 生成进度 + 实时速度 ---- */
+  if(busy && live.max_tokens>0){
+    const pct = Math.min(100, Math.round((live.generated||0)/live.max_tokens*100));
+    $("#genBar").style.width = pct+"%";
+    $("#genTxt").textContent = (live.generated||0)+" / "+live.max_tokens+" tokens（"+pct+"%）"+
+      (live.tok_s ? " · "+Number(live.tok_s).toFixed(1)+" tok/s" : "")+
+      (live.elapsed_s ? " · "+Math.round(live.elapsed_s)+"s" : "");
+  } else if(tot.output_tokens){
+    $("#genBar").style.width = "100%";
+    $("#genTxt").textContent = "累计输出 "+tot.output_tokens+" tokens";
+  } else {
+    $("#genBar").style.width = "0%"; $("#genTxt").textContent = "—";
+  }
+
+  /* ---- 速度 ---- */
+  const spd = live.tok_s_mean || hw.tok_s_mean || tot.decode_ms && (tot.output_tokens/(tot.decode_ms/1000));
+  $("#spd").innerHTML = (spd ? Number(spd).toFixed(1) : "—") + "<small>tok/s</small>";
+  $("#spdSub").textContent = busy && live.tok_s ? ("实时 "+Number(live.tok_s).toFixed(1)) : "平均解码";
+  const pre = live.prefill_tok_s_mean || hw.prefill_tok_s_mean;
+  $("#prefill").textContent = pre ? Number(pre).toFixed(1)+" t/s" : "—";
+  const dOff = tot.drafts_offered, dAcc = tot.drafts_accepted;
+  $("#draft").textContent = dOff ? Math.round(dAcc/dOff*100)+"%（"+dAcc+"/"+dOff+"）" : "—";
+
+  /* ---- 上下文 ---- */
+  const ctx = eng.max_context||0, used = live.prompt_tokens || tot.prompt_tokens || 0;
+  const pct = ctx ? Math.min(100, used/ctx*100) : 0;
+  $("#ctxPct").textContent = ctx ? pct.toFixed(1)+"%" : "—";
+  $("#ctxTxt").textContent = ctx ? (used/1000).toFixed(1)+"k / "+(ctx/1000).toFixed(0)+"k" : "—";
+  $("#ring").style.strokeDashoffset = String(226 - 226*pct/100);
+
+  /* ---- 内存 ---- */
+  if(hw.ram_total){
+    const u = hw.ram_used/1073741824, t = hw.ram_total/1073741824;
+    $("#ram").innerHTML = u.toFixed(1)+"<small>/ "+t.toFixed(0)+" GB</small>";
+    const rp = u/t;
+    $("#ramFill").style.width = Math.round(rp*100)+"%";
+    $("#ramBar").dataset.hi = rp>0.95?"2":(rp>0.85?"1":"0");
+    $("#ramSub").textContent = "剩余 "+(t-u).toFixed(1)+" GB"
+      + (eng.arena_mib ? " · 显存池 "+(eng.arena_mib/1024).toFixed(0)+"G" : "");
+  }
+
+  /* ---- CPU ---- */
+  if(hw.cpu!=null){
+    $("#cpu").innerHTML = Number(hw.cpu).toFixed(0)+"<small>%</small>";
+    $("#cpuFill").style.width = Math.min(100,hw.cpu)+"%";
+  }
+  $("#cpuSub").textContent = (hs.cores?hs.cores+" 核":"") + (hs.threads?" · "+hs.threads+" 线程":"");
+
+  /* ---- 磁盘 ---- */
+  if(hw.disk_read_mb!=null){
+    const rd = hw.disk_read_mb, big = rd>=1000;
+    $("#disk").innerHTML = (big?(rd/1024).toFixed(2):rd.toFixed(1))+"<small>"+(big?"GB/s":"MB/s")+"</small>";
+    $("#diskSub").textContent = "写 "+(hw.disk_write_mb!=null?hw.disk_write_mb.toFixed(1):"0")+" MB/s";
+  }
+
+  /* ---- 专家缓存 / PCIe ---- */
+  $("#slots").textContent = eng.expert_slots!=null ? eng.expert_slots.toLocaleString() : "—";
+  $("#slotsSub").textContent = eng.expert_cache_mib ? (eng.expert_cache_mib/1024).toFixed(1)+" GB 已缓存" : "个已缓存";
+  if(eng.pcie_frac!=null){
+    const pf = eng.pcie_frac*100;
+    $("#pcie").innerHTML = pf.toFixed(0)+"<small>%</small>";
+    $("#pcieSub").textContent = pf>30 ? "★ 专家大量走总线（慢）" : "专家走总线的比例";
+  }
+
+  /* ---- 运行 ---- */
+  if(tot.since){
+    $("#uptime").textContent = fmtDur(d.time - tot.since);
+  }
+  $("#reqN").textContent = tot.requests!=null ? tot.requests : "—";
+  $("#outTok").textContent = tot.output_tokens!=null ? tot.output_tokens.toLocaleString() : "—";
+  $("#draftAll").textContent = dOff ? Math.round(dAcc/dOff*100)+"%" : "—";
+  $("#conc").textContent = (live.queued!=null?live.queued:0)+" / "+(eng.pool_workers!=null?eng.pool_workers:"—");
+}
+
+function fmtDur(s){
+  s = Math.round(s);
+  if(s<60) return s+" 秒";
+  if(s<3600) return Math.floor(s/60)+" 分 "+(s%60)+" 秒";
+  return Math.floor(s/3600)+" 时 "+Math.floor(s%3600/60)+" 分";
+}
+
+/* 本轮记录（页面自己维护，不依赖服务端） */
+const reqs = [];
+function addReq(o){
+  reqs.unshift(o);
+  if(reqs.length>12) reqs.pop();
+  renderReqs();
+}
+function renderReqs(){
+  const b = $("#reqBody");
+  if(!reqs.length){ b.innerHTML = '<tr><td colspan="4" class="sub">还没有记录</td></tr>'; return; }
+  b.innerHTML = reqs.map(r =>
+    "<tr><td>"+r.t+"</td><td class='n'>"+r.out+"</td><td>"+(r.tps||"—")+"</td><td>"+r.secs+"s</td></tr>"
+  ).join("");
+}
+
+/* ---------- 渲染 ---------- */
+function esc(t){ return String(t).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function fmt(t){
+  let h = esc(t);
+  // 公式块：$$...$$ 或 \[...\]
+  h = h.replace(/\$\$([\s\S]+?)\$\$/g, (m,c)=>'<div class="tex">'+c.trim()+"</div>");
+  h = h.replace(/\\\[([\s\S]+?)\\\]/g, (m,c)=>'<div class="tex">'+c.trim()+"</div>");
+  h = h.replace(/```(\w*)\n([\s\S]*?)```/g,(m,l,c)=>"<pre><code>"+c.trim()+"</code></pre>");
+  h = h.replace(/`([^`\n]+)`/g,"<code>$1</code>");
+  h = h.replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>");
+  h = h.replace(/^#{1,4}\s*(.+)$/gm,"<b>$1</b>");
+  return h;
+}
+/* ★ meta 是每条 AI 回答自带的元信息，用于「分享」时写进文件头
+     {ts:毫秒时间戳, model:模型名, gear:档位, q:这一问的问题, secs:耗时, chars:字数} */
+function addMsg(role, content, meta){
+  const e = $("#empty"); if(e) e.remove();
+  const d = document.createElement("div");
+  d.className = "msg " + (role==="user"?"u":"a");
+  d.innerHTML = '<div class="who">'+(role==="user"?"问":"AI")+'</div><div class="bd">'+
+    '<div class="role">'+(role==="user"?"问":"Strata")+'</div><div class="content"></div></div>';
+  d.querySelector(".content").innerHTML = fmt(content);
+  d.querySelector(".bd").dataset.raw = content;
+  if(meta){
+    const bd = d.querySelector(".bd");
+    if(meta.ts)      bd.dataset.ts    = meta.ts;
+    if(meta.model)   bd.dataset.model = meta.model;
+    if(meta.gear)    bd.dataset.gear  = meta.gear;
+    if(meta.q != null) bd.dataset.q   = meta.q;
+    if(meta.secs)    bd.dataset.secs  = meta.secs;
+  }
+  if(role !== "user") addActs(d);
+  wrapEl.appendChild(d);
+  scrollEl.scrollTop = scrollEl.scrollHeight;
+  return d;
+}
+
+/* ==========================================================================
+   ★ 每条回答下方的操作条：朗读 · 复制 · 分享（2026-10-10 新增）
+     · 朗读念的是【这一条】（以前是全页只认「最近一条」，现在一律按条）
+     · 正文原文存在 .bd 的 data-raw 上，复制/分享/朗读都从它取，不再依赖全局变量
+   ========================================================================== */
+function addActs(d, meta){
+  const bd = d.querySelector(".bd");
+  if(bd.querySelector(".acts")) return;
+  if(meta){
+    if(meta.ts)  bd.dataset.ts    = meta.ts;
+    if(meta.q != null) bd.dataset.q = meta.q;
+  }
+  const bar = document.createElement("div");
+  bar.className = "acts";
+  bar.innerHTML =
+    '<button class="ab" data-act="speak" title="用本机 TTS 念这一条">'+
+      '<svg class="ic"><use href="#i-speak"/></svg><span class="lb">朗读</span></button>'+
+    '<button class="ab" data-act="copy" title="复制这一条的原文">'+
+      '<svg class="ic"><use href="#i-copy"/></svg><span class="lb">复制</span></button>'+
+    '<button class="ab" data-act="share" title="导出成 .md 文件">'+
+      '<svg class="ic"><use href="#i-download"/></svg><span class="lb">分享</span></button>';
+  const raw = ()=> bd.dataset.raw || "";
+  bar.querySelector('[data-act="speak"]').onclick = (e)=> onSpeakClick(e.currentTarget, raw());
+  bar.querySelector('[data-act="copy"]').onclick  = (e)=> doCopy(e.currentTarget, raw());
+  bar.querySelector('[data-act="share"]').onclick = (e)=> doShare(e.currentTarget, bd);
+  bd.appendChild(bar);
+}
+/* 流式结束后调用：把真实耗时写回，分享时就能带上准确用时 */
+function finActs(bd, secs, q){
+  if(!bd || !bd.dataset.raw) return;
+  const d = bd.closest(".msg"); if(!d) return;
+  if(secs) bd.dataset.secs = secs;
+  if(q != null) bd.dataset.q = q;
+  addActs(d, null);
+  if(!d.querySelector(".acts")) return;
+}
+
+function icUse(id){ return '<svg class="ic"><use href="#i-'+id+'"/></svg>'; }
+/* 按钮闪烁反馈：先换成图标，再用文字宽度锁住尺寸，避免"复制中"把布局抖一下 */
+function flash(btn, text, cls, ms){
+  const lb = btn.querySelector(".lb");
+  if(!lb) return;
+  if(!btn.dataset.w) btn.dataset.w = String(Math.ceil(lb.getBoundingClientRect().width));
+  lb.style.display = "inline-block";
+  lb.style.width = btn.dataset.w + "px";
+  lb.textContent = text;
+  btn.classList.remove("ok","err","busy");
+  if(cls) btn.classList.add(cls);
+  setTimeout(()=>{
+    lb.style.display = ""; lb.style.width = "";
+    lb.textContent = btn.dataset.act === "copy" ? "复制" : "分享";
+    btn.classList.remove("ok","err","busy");
+  }, ms || 1600);
+}
+
+/* ---------- 复制（带 execCommand 回退：file:// 或非 https 下 clipboard 不可用） ---------- */
+async function doCopy(btn, text){
+  if(!text){ flash(btn, "无内容", "err"); return; }
+  let ok = false;
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  }catch(e){ ok = false; }
+  if(!ok){
+    try{
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly","");
+      ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+      document.body.appendChild(ta);
+      ta.select(); ta.setSelectionRange(0, text.length);
+      ok = document.execCommand("copy");
+      ta.remove();
+    }catch(e){ ok = false; }
+  }
+  if(ok){
+    const svg = btn.querySelector("svg");
+    if(svg) svg.innerHTML = '<use href="#i-check"/>';
+    flash(btn, "已复制", "ok", 1500);
+    setTimeout(()=>{ if(svg) svg.innerHTML = '<use href="#i-copy"/>'; }, 1600);
+  } else {
+    flash(btn, "复制失败", "err", 2200);
+  }
+}
+
+/* ---------- 分享 = 导出为 .md 文件（本机界面没有云端/系统分享面板，见报告） ---------- */
+function two(n){ return String(n).padStart(2,"0"); }
+function stamp(ms){
+  const d = new Date(ms || Date.now());
+  return d.getFullYear()+"-"+two(d.getMonth()+1)+"-"+two(d.getDate())+" "+
+         two(d.getHours())+":"+two(d.getMinutes());
+}
+function stampFile(ms){
+  const d = new Date(ms || Date.now());
+  return d.getFullYear()+"-"+two(d.getMonth()+1)+"-"+two(d.getDate())+"-"+two(d.getHours())+two(d.getMinutes());
+}
+function safeName(s){
+  return String(s||"").replace(/[\\/:*?"<>|\r\n\t]+/g," ").replace(/\s+/g," ").trim().slice(0,24);
+}
+const GEAR_CN = { auto:"自动", direct:"直答", think:"该想" };
+
+function doShare(btn, bd){
+  const text = bd.dataset.raw || "";
+  if(!text){ flash(btn, "无内容", "err"); return; }
+  const ts    = Number(bd.dataset.ts) || Date.now();
+  const model = bd.dataset.model || "strata";
+  // 老会话（这次改版之前存的）没记档位，就按当前档位标注 —— 总比空着好，且不会编造"用时"
+  const g     = bd.dataset.gear || gear;
+  const secs  = bd.dataset.secs || "";
+  const q     = bd.dataset.q || "";
+  const head =
+    "# Strata 回答\n"+
+    "> 时间："+stamp(ts)+" · 模型："+model+
+      (g ? " · 档位："+(GEAR_CN[g]||g) : "")+
+      (secs ? " · 用时："+secs+" 秒" : "")+"\n\n"+
+    "问题："+(q ? q.replace(/\s+/g," ").slice(0,200) : "（未记录）")+"\n\n---\n\n";
+  const md = head + text + "\n";
+  let name = "strata-"+stampFile(ts);
+  const brief = safeName(q || text).replace(/ /g,"-");
+  if(brief) name += "-" + brief;
+  name += ".md";
+  try{
+    const blob = new Blob([md], {type:"text/markdown;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+    flash(btn, "已下载", "ok", 1800);
+  }catch(e){
+    flash(btn, "导出失败", "err", 2200);
+  }
+  window.__lastShare = {name:name, md:md.slice(0,300)};   // 留个抓手，方便验证/排查
+}
+
+/* ---------- 文件上传（只收文本；图片模型不支持）---------- */
+let attached = [];               // [{name, text, bytes}]  ★ bytes = UTF-8 字节数
+const MAX_ONE = 200 * 1024;      // 单文件 200 KB（★ 字节）
+const MAX_ALL = 400 * 1024;      // 合计 400 KB（★ 字节）
+const _TENC = new TextEncoder();
+const utf8Bytes = s => _TENC.encode(s).length;     // ★ 中文字符 = 3 字节，不能再拿 .length 当字节用
+const kb = n => Math.round((n||0)/1024);
+window.__attachDiag = ()=>({ n:attached.length,
+  bytes:attached.reduce((s,a)=>s+(a.bytes||0),0),
+  chars:attached.reduce((s,a)=>s+(a.text||"").length,0),
+  names:attached.map(a=>a.name) });
+
+$("#attach").onclick = ()=> $("#file").click();
+$("#file").onchange = async (e)=>{
+  const fs = [...e.target.files]; e.target.value = "";
+  for(const f of fs){
+    if(f.size > MAX_ONE){ alert(f.name + " 太大（" + kb(f.size) + " KB > " + kb(MAX_ONE) + " KB），跳过"); continue; }
+    let txt;
+    try{ txt = await f.text(); }
+    catch(err){ alert(f.name + " 读取失败：" + err.message); continue; }
+    // ★★ 重要-9：以前是「字符数 + 字节数」混着加（attached.reduce(s+a.text.length) + f.size），
+    //    4 个中文附件攒到 816032 字节 = 797KB 才被拦（标称 400KB）。现在统一按字节算。
+    const b   = utf8Bytes(txt);
+    const tot = attached.reduce((s,a)=>s+(a.bytes||0),0);
+    if(tot + b > MAX_ALL){
+      alert("附件总量已到上限（" + kb(MAX_ALL) + " KB，按字节算；已有 " + kb(tot) + " KB，"
+            + "这个文件 " + kb(b) + " KB）—— 先发一次再传");
+      break;
+    }
+    attached.push({name:f.name, text:txt, bytes:b});
+  }
+  renderAttach();
+};
+function renderAttach(){
+  const b = $("#attachBox");
+  if(!attached.length){ b.hidden = true; b.innerHTML = ""; return; }
+  b.hidden = false;
+  b.innerHTML = attached.map((a,i)=>
+    '<span class="chip"><span>'+esc(a.name)+' · '+kb(a.bytes)+'K</span><b data-i="'+i+'" title="移除"><svg class="ic" style="width:12px;height:12px"><use href="#i-x"/></svg></b></span>'
+  ).join("");
+  b.querySelectorAll("b").forEach(x=>x.onclick=()=>{ attached.splice(+x.dataset.i,1); renderAttach(); });
+}
+
+/* ---------- 语音输入（浏览器录音 → 代理 → 本地 whisper）---------- */
+let rec = null, chunks = [], recStart = 0, recTimer = null;
+
+async function toggleRec(){
+  if(rec && rec.state === "recording"){
+    rec.stop(); return;
+  }
+  let stream;
+  try{ stream = await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ alert("拿不到麦克风：" + e.message); return; }
+
+  rec = new MediaRecorder(stream, {mimeType: MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm"});
+  chunks = [];
+  rec.ondataavailable = e => { if(e.data.size) chunks.push(e.data); };
+  rec.onstop = async ()=>{
+    stream.getTracks().forEach(t=>t.stop());
+    clearInterval(recTimer); recTimer = null;
+    $("#mic").classList.remove("rec");
+    const secs = (Date.now()-recStart)/1000;
+    if(secs < 0.6){ $("#recHint").textContent = "太短了，再说一次"; setTimeout(()=>$("#recHint").innerHTML='Enter 发送 · Shift+Enter 换行<span id="stat"></span>', 1800); return; }
+    $("#recHint").textContent = "转写中…（本地 whisper，首次约 60 秒）";
+    const blob = new Blob(chunks, {type:"audio/webm"});
+    try{
+      const r = await fetch("stt", {method:"POST", headers:{"Content-Type":"audio/webm"}, body:blob});
+      const d = await r.json();
+      if(d.text){ const i=$("#input"); i.value = (i.value ? i.value + " " : "") + d.text; i.dispatchEvent(new Event("input")); i.focus(); }
+      else alert("没听清：" + (d.error||"空结果"));
+    }catch(e){ alert("转写失败：" + e.message); }
+    $("#recHint").innerHTML = 'Enter 发送 · Shift+Enter 换行<span id="stat"></span>';
+  };
+  rec.start();
+  recStart = Date.now();
+  $("#mic").classList.add("rec");
+  recTimer = setInterval(()=>{ $("#recHint").textContent = "录音中 " + Math.round((Date.now()-recStart)/1000) + " 秒 —— 再点一次停止"; }, 300);
+}
+$("#mic").onclick = toggleRec;
+
+/* ==========================================================================
+   语音朗读（调代理 → DSH 的 TTS → Fairy 音色）
+   改版：
+     · 朗读按钮从顶栏旁边/输入框那排，搬到【每条回答下方】的操作条里
+     · 念哪条就传哪条的原文（存在 .bd 的 data-raw 上，不再用「最近一条」这种全局变量）
+     · 同一时刻只允许一条在念；再点一下就是停
+   ========================================================================== */
+let curAudio = null;      // 当前在播的 <audio>
+let curUrl   = null;      // 它对应的 blob url（换一条时要记得回收）
+let spkBtn   = null;      // 当前正在念的那个按钮
+
+function stopSpeak(){
+  if(curAudio){ try{ curAudio.pause(); }catch(e){} curAudio = null; }
+  if(curUrl){ try{ URL.revokeObjectURL(curUrl); }catch(e){} curUrl = null; }
+  if(spkBtn){ paintSpk(spkBtn,"off"); spkBtn = null; }
+}
+
+/* 把一个按钮画成 朗读/停止/加载/失败 四种样子（颜色全走 CSS class，不硬编码） */
+function paintSpk(btn, s, label){
+  if(!btn) return;
+  const lb = btn.querySelector(".lb"), svg = btn.querySelector("svg");
+  btn.classList.remove("busy","on","err");
+  if(s === "busy"){ btn.classList.add("busy"); if(lb) lb.textContent = "准备中"; if(svg) svg.innerHTML = '<use href="#i-wait"/>'; }
+  else if(s === "on"){ btn.classList.add("on"); if(lb) lb.textContent = "停止"; if(svg) svg.innerHTML = '<use href="#i-stop"/>'; }
+  else if(s === "err"){ btn.classList.add("err"); if(lb) lb.textContent = label || "朗读失败"; if(svg) svg.innerHTML = '<use href="#i-speak"/>'; }
+  else { if(lb) lb.textContent = "朗读"; if(svg) svg.innerHTML = '<use href="#i-speak"/>'; }
+}
+
+/* ==========================================================================
+   ★ 朗读失败提示条（2026-10-10 加）
+     【为什么】以前只有按钮变红 + 输入框旁边一行小字，用户不知道该怎么办。
+     实测（2026-10-10 13:5x）：球念 -> POST /say -> 503，代理返回是
+     「插件新路由还没加载，需要重启 DSH 才生效」；DSH /api/fairy/push 直接 401。
+     【怎么做】把原因和下一步直接贴在【出问题的那条回答】下面，并给一个
+     「改用网页念」按钮 —— 不用等重启 DSH 也能马上听。
+   ========================================================================== */
+function showSpeakTip(btn, text, actionLabel, actionFn){
+  const msg = btn && btn.closest(".msg");
+  if(!msg) return null;
+  msg.querySelectorAll(".tip").forEach(x=>x.remove());     // 同一条只留一个
+  const t = document.createElement("div");
+  t.className = "tip";
+  const tx = document.createElement("span");
+  tx.className = "tx"; tx.textContent = text;
+  t.appendChild(tx);
+  if(actionLabel){
+    const b = document.createElement("button");
+    b.textContent = actionLabel;
+    b.onclick = ()=>{ t.remove(); if(actionFn) actionFn(); };
+    t.appendChild(b);
+  }
+  const x = document.createElement("button");
+  x.className = "tipx"; x.title = "知道了"; x.textContent = "×";
+  x.onclick = ()=> t.remove();
+  t.appendChild(x);
+  const bd = msg.querySelector(".bd") || msg;
+  bd.appendChild(t);
+  setTimeout(()=>{ try{ t.remove(); }catch(e){} }, 45000);   // 45 秒后自己收掉，别一直堆着
+  return t;
+}
+
+/* 球念失败 -> 判是不是「要重启 DSH」这一类，再决定说什么 */
+function ballFail(btn, text, why, stat){
+  paintSpk(btn, "err", "球念失败");
+  if(/重启|还没加载|未注册|unauthorized|401|503/.test(why)){
+    showSpeakTip(btn,
+      "球念失败：DSH 需要重启一次才生效（路由未加载），重启前请先用「网页念」。",
+      "改用网页念", ()=> speak(text, btn));
+  }else{
+    showSpeakTip(btn, "球念失败：" + why, null, null);
+  }
+  if(stat) stat.textContent = "球念失败：" + why;     // 输入框旁边也留一份，方便对日志
+  setTimeout(()=>{ if(stat) stat.textContent = ""; }, 9000);
+}
+
+/* 网页自己出声：POST /tts -> audio/mpeg -> <audio> 播放（念这一条） */
+async function speak(text, btn){
+  if(!text || !text.trim()) return;
+  const was = curAudio;
+  stopSpeak();                       // 先把上一条停掉（顺便把它的按钮复位）
+  if(was){ try{ was.onended = null; }catch(e){} }
+  spkBtn = btn || null;
+  paintSpk(spkBtn, "busy");
+  const url0 = URL.createObjectURL(new Blob());   // 占位，确保 stopSpeak 一定能回收
+  let url = null;
+  try{
+    const r = await fetch("tts", {method:"POST", headers:{"Content-Type":"application/json"},
+                                 body: JSON.stringify({text: text.slice(0, 600)})});
+    if(!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0,120));
+    url = URL.createObjectURL(await r.blob());
+    URL.revokeObjectURL(url0);
+    if(spkBtn !== btn) { URL.revokeObjectURL(url); return; }   // 期间用户换了一条，丢弃
+    const au = new Audio(url);
+    curAudio = au; curUrl = url;
+    au.onended = ()=>{
+      if(curUrl === url){ try{ URL.revokeObjectURL(url); }catch(e){} curUrl = null; curAudio = null; }
+      if(spkBtn === btn){ spkBtn = null; paintSpk(btn, "off"); }
+    };
+    await au.play();
+    paintSpk(btn, "on");
+  }catch(e){
+    try{ URL.revokeObjectURL(url0); }catch(_e){}
+    if(url){ try{ URL.revokeObjectURL(url); }catch(_e){} }
+    if(spkBtn === btn){ spkBtn = null; }
+    paintSpk(btn, "err", "网页念失败");
+    // ★ 浏览器自动播放策略：没有【用户手势】时 play() 会被挡（fetch 本身不会被挡）
+    if(e && e.name === "NotAllowedError"){
+      showSpeakTip(btn,
+        "浏览器拦了自动播放（这一条不是你点出来的，没有点击手势）：点一下这条的「朗读」按钮就会出声。",
+        "现在念", ()=> speak(text, btn));
+    }else{
+      showSpeakTip(btn, "网页念失败：" + String(e && e.message || e), "重试", ()=> speak(text, btn));
+    }
+    setTimeout(()=>{ if(spkBtn !== btn) paintSpk(btn, "off"); }, 2600);
+  }
+}
+
+/* ★ 让桌面球念（球用 Fairy 克隆音色出声）
+     走 POST /say -> fairy_ui.py -> DSH 插件 /api/fairy/push
+     ★ 不需要浏览器播放，所以没有音频对象；只看代理返回 ok / seq
+     ★ 插件那边 REPLY_MAX_CHARS = 150，超出会被截断（用户讨厌啰嗦，这是设计） */
+async function speakBall(text, btn){
+  if(!text || !text.trim()) return;
+  stopSpeak();
+  spkBtn = btn || null;
+  paintSpk(spkBtn, "busy");
+  const stat = $("#stat");
+  try{
+    const r = await fetch("say", {method:"POST", headers:{"Content-Type":"application/json"},
+                                 body: JSON.stringify({text: text.slice(0, 400), source:"strata"})});
+    let d = {};
+    try{ d = await r.json(); }catch(e){}
+    if(!r.ok || !d.ok) throw new Error(d.error || ("HTTP " + r.status));
+    paintSpk(btn, "on");
+    const m = btn && btn.closest(".msg"); if(m) m.querySelectorAll(".tip").forEach(x=>x.remove());
+    if(stat) stat.textContent = "已推给球（seq " + d.seq + (d.truncated ? " · 已截断" : "") + "）";
+    setTimeout(()=>{
+      if(stat) stat.textContent = "";
+      if(spkBtn === btn){ spkBtn = null; paintSpk(btn, "off"); }
+    }, 5000);
+  }catch(e){
+    if(spkBtn === btn) spkBtn = null;
+    // ★ 不再只变红 + 三个字「朗读失败」：把【为什么】和【怎么办】贴到那条回答下面
+    ballFail(btn, text, String(e.message || e), stat);
+    setTimeout(()=>{ if(spkBtn !== btn) paintSpk(btn, "off"); }, 9000);
+  }
+}
+
+/* 操作条上的「朗读」：再点一下 = 停；自动朗读开着就跟随它的模式（网页念 / 球念） */
+function onSpeakClick(btn, text){
+  if(spkBtn === btn && curAudio){ stopSpeak(); return; }
+  if(!text || !text.trim()){ paintSpk(btn, "err"); setTimeout(()=>{ if(spkBtn !== btn) paintSpk(btn,"off"); }, 2000); return; }
+  if(speakMode === "ball") speakBall(text, btn);
+  else speak(text, btn);
+}
+
+/* ★★★ 顶栏三态开关（保留）：管的是「回答完自动念」，和每条下面的手动朗读是两回事
+     off  = 不自动念
+     web  = 回答完，网页自己出声（POST /tts -> <audio>）
+     ball = ★ 回答完，桌面球用 Fairy 克隆音色念（POST /say -> DSH 插件 /api/fairy/push）
+            ⚠️ 需要【重启过 DSH】才生效（插件新路由要重新加载） */
+const SPEAK_MODES = ["off", "web", "ball"];
+const SPK_TEXT  = { off: "不念", web: "网页念", ball: "球念" };
+const SPK_TITLE = {
+  off:  "自动朗读：关（点一下 -> 网页念）\n回答下方的「朗读」按钮随时可以单条念",
+  web:  "自动朗读：网页自己出声（点一下 -> 球念）",
+  ball: "自动朗读：桌面球用 Fairy 音色念（点一下 -> 关）\n需要重启过 DSH 才生效",
+};
+let speakMode = localStorage.getItem("strata_speakmode") || "off";
+if (!SPEAK_MODES.includes(speakMode)) speakMode = "off";
+// 兼容老键：以前是 0/1 的开关，开着的话默认走网页念
+if (speakMode === "off" && localStorage.getItem("strata_autospeak") === "1") speakMode = "web";
+
+function paintAutoSpeak(){
+  const b = $("#autoSpeak");
+  b.textContent = SPK_TEXT[speakMode];
+  b.title = SPK_TITLE[speakMode];
+  // 颜色只给一个「当前档」的提示色，图标本身走 currentColor 跟着变
+  const c = speakMode === "ball" ? "var(--accent)" : (speakMode === "web" ? "var(--ok)" : "");
+  b.style.color = c;
+  b.style.borderColor = c;
+}
+$("#autoSpeak").onclick = ()=>{
+  speakMode = SPEAK_MODES[(SPEAK_MODES.indexOf(speakMode) + 1) % SPEAK_MODES.length];
+  localStorage.setItem("strata_speakmode", speakMode);
+  paintAutoSpeak();
+  if (speakMode !== "web") stopSpeak();   // 切走网页念就停掉正在播的
+};
+paintAutoSpeak();
+
+/* ---------- 发送 ---------- */
+const input=$("#input"), sendBtn=$("#send");
+input.addEventListener("input",()=>{
+  input.style.height="auto";
+  input.style.height=Math.min(input.scrollHeight,180)+"px";
+  sendBtn.disabled=!input.value.trim();
+});
+input.addEventListener("keydown",e=>{
+  if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); if(input.value.trim()&&!ctrl) send(); }
+});
+document.querySelectorAll(".quick button").forEach(b=>{
+  b.onclick=()=>{ input.value=b.dataset.q; input.dispatchEvent(new Event("input")); input.focus(); };
+});
+
+async function send(){
+  const q=input.value.trim();
+  if(!q||ctrl) return;
+
+  let plan;
+  if(gear==="direct")     plan={kind:"direct",effort:"none",budget:0,why:"手动指定：直答"};
+  else if(gear==="think") plan={kind:"think",effort:"high",budget:400,why:"手动指定：该想"};
+  else                    plan=classify(q);
+
+  // 附件拼进发给模型的内容；界面只显示文件名
+  // ★ 重要-10：正文放 wire（内存里发请求用），落盘时会被剥掉，只留 files=文件名+大小
+  let toSend = q, shown = q, files = null;
+  if(attached.length){
+    files  = attached.map(a=>({name:a.name, bytes:a.bytes}));
+    toSend = attached.map(a=>"【文件："+a.name+"】\n```\n"+a.text+"\n```").join("\n\n") + (q ? "\n\n" + q : "");
+    shown  = (q ? q + "\n\n" : "") + "附件：" + attached.map(a=>a.name).join("、");
+  }
+
+  const S = cur() || newSession(true);
+  addMsg("user",shown);
+  if(files) S.msgs.push({role:"user",content:shown,wire:toSend,files:files});
+  else      S.msgs.push({role:"user",content:toSend});
+  if(S.title==="新会话") S.title = (q||attached[0].name).slice(0,18) + ((q||"").length>18?"…":"");
+  S.ts = Date.now();
+  attached = []; renderAttach();
+  renderSess(); saveAll();
+  input.value=""; input.style.height="auto"; sendBtn.disabled=true;
+
+  const set=addMsg("assistant","",{ts:Date.now(), model:"strata", gear:gear, q:q});
+  const bd=set.querySelector(".bd"), contentEl=bd.querySelector(".content");
+  contentEl.innerHTML='<span style="color:var(--fg3)">思考中…</span>';
+
+  const tk=document.createElement("details");
+  tk.className="think"; tk.open=true;
+  tk.innerHTML='<summary>思考过程 </summary><div class="tk"></div>';
+  bd.insertBefore(tk,contentEl);
+
+  const tag=document.createElement("div");
+  tag.className="meta";
+  tag.innerHTML='<span class="tag '+plan.kind+'">'+(plan.kind==="direct"?"直答":"该想")+"</span>"+
+    "<span>档位 <b>"+plan.effort+"</b></span><span>思考预算 <b>"+(plan.budget||"不限")+"</b></span>"+
+    "<span>依据 "+esc(plan.why)+"</span>";
+  bd.appendChild(tag);
+
+  sendBtn.textContent="停止"; sendBtn.classList.add("stop"); sendBtn.disabled=false;
+  sendBtn.onclick=()=>{ ctrl&&ctrl.abort(); };
+
+  ctrl=new AbortController();
+  const t0=performance.now();
+  let txt="",rz="",done=0;
+
+  try{
+    const res=await fetch("v1/chat/completions",{
+      method:"POST", headers:{"Content-Type":"application/json"}, signal:ctrl.signal,
+      body:JSON.stringify({model:"strata",messages:apiMsgs(S),max_tokens:2500,temperature:0.3,
+        stream:true, reasoning_effort:plan.effort, reasoning_budget_tokens:plan.budget})
+    });
+    if(!res.ok) throw new Error("HTTP "+res.status+" "+(await res.text()).slice(0,180));
+
+    const rd=res.body.getReader(), dec=new TextDecoder(); let buf="";
+    for(;;){
+      const {done:d2,value}=await rd.read(); if(d2) break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split("\n"); buf=lines.pop();
+      for(const ln of lines){
+        const s=ln.trim(); if(!s.startsWith("data:")) continue;
+        const c=s.slice(5).trim(); if(c==="[DONE]") continue;
+        let o; try{o=JSON.parse(c);}catch{continue;}
+        const dl=((o.choices||[])[0]||{}).delta||{};
+        if(dl.reasoning_content){
+          rz+=dl.reasoning_content;
+          tk.querySelector(".tk").textContent=rz;
+          tk.querySelector("summary").textContent="思考过程（"+rz.length+" 字）";
+          scrollEl.scrollTop=scrollEl.scrollHeight;
+        }
+        if(dl.content){
+          if(!txt) contentEl.textContent="";
+          txt+=dl.content; done++;
+          contentEl.innerHTML=fmt(txt);
+          scrollEl.scrollTop=scrollEl.scrollHeight;
+        }
+      }
+    }
+  }catch(e){
+    if(e.name==="AbortError") contentEl.innerHTML+='<div style="color:var(--fg3);margin-top:6px">（已停止）</div>';
+    else { const b=document.createElement("div"); b.className="err-box"; b.textContent="请求失败："+e.message; bd.appendChild(b); }
+  }
+
+  const secs=(performance.now()-t0)/1000;
+  tk.open=false;
+  if(!rz) tk.remove();
+
+  if(!txt.trim()){
+    const w=document.createElement("div"); w.className="meta";
+    w.innerHTML='<span class="tag warn">★ 答案为空 —— 思考把配额吃光了</span><span>对策：调小思考预算，或调大 max_tokens</span>';
+    bd.appendChild(w);
+  }
+
+  const tps = secs>0 ? (done/secs).toFixed(1) : "—";
+  tag.innerHTML+="<span>耗时 <b>"+secs.toFixed(1)+"s</b></span><span>答案 <b>"+txt.length+"</b> 字</span>"+
+                 '<span>≈ <b>'+tps+"</b> 字/秒</span>";
+  $("#stat").textContent="";
+
+  // 记进侧边栏的请求历史
+  addReq({ t:new Date().toLocaleTimeString(), out:txt.length||0, tps:tps, secs:secs.toFixed(1) });
+
+  if(txt){
+    S.msgs.push({role:"assistant",content:txt, ts:Date.now(), model:"strata", gear:gear, q:q, secs:Number(secs.toFixed(1))});
+    S.ts = Date.now(); renderSess(); saveAll();
+    // ★ 把这一条的原文和元信息落到操作条上（朗读/复制/分享都从这里取）
+    bd.dataset.raw = txt;
+    finActs(bd, secs.toFixed(1), q);
+    // ★ 自动念（按当前模式派发）
+    //   web  -> 网页自己出声（/tts）
+    //   ball -> ★ 桌面球用 Fairy 音色念（/say）
+    const btn = bd.querySelector('.acts [data-act="speak"]');
+    if(speakMode === "web") speak(txt, btn);
+    else if(speakMode === "ball") speakBall(txt, btn);
+  }
+  sendBtn.textContent="发送"; sendBtn.classList.remove("stop");
+  sendBtn.onclick=send; sendBtn.disabled=!input.value.trim();
+  ctrl=null; input.focus();
+}
+sendBtn.onclick=send;
+
+/* ---------- 启动 ---------- */
+pollMetrics();
+setInterval(pollMetrics, 2000);   // 2 秒一轮；/metrics 很轻，生成中也能保持流畅
+
+/* ---------- 启动：载入会话 ---------- */
+sessions = loadAll();
+if(sessions.length){ curId = sessions[0].id; renderSess(); repaint(); }
+else { renderSess(); }          // 保留 HTML 里的空状态
+window.addEventListener("beforeunload", saveAll);
+</script>
+</body>
+</html>

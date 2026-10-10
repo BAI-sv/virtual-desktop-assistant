@@ -1,0 +1,140 @@
+{
+  "_说明": "Fairy 统一配置【示例·复制成 fairy.json 用】：所有组件的开关都在这。改完保存即可（多数项下次启动生效）。",
+  "components": {
+    "ball": true,
+    "guard": true,
+    "tts": false,
+    "host": true
+  },
+  "_silent_说明": [
+    "这里列出的脚本一律用 pythonw.exe 启动（绝不弹控制台窗口）。",
+    "  写成脚本名（indextts_guard.py）或组件名（guard）都认。",
+    "  为什么用 pythonw：venv 的 python.exe 只是个启动器，会二次启动",
+    "    真解释器，那次二次启动 creationflags 管不到 -> 照样弹窗；pythonw 根本不建控制台。",
+    "  ★ 前提：日志必须继续写文件（这些脚本的 stdout/stderr 都被父进程重定向到 logs\\*.log）。"
+  ],
+  "silent": {
+    "indextts_guard.py": true,
+    "indextts_start.py": true,
+    "bootstrap.py": true,
+    "fairy_host.py": true,
+    "fairy_ball.py": true
+  },
+  "_endpoints_说明": [
+    "接口寻址。优先级：环境变量 > 这里 > 代码默认值。",
+    "dsh_base    : DSH（DeepSeek Harness）的地址，球优先用它。",
+    "local_base  : Fairy 本地服务 fairy_host.py 的地址（DSH 不在时自动切过来）。",
+    "indextts_url: Fairy 音色的真正来源。球【优先直连】它，不再需要 DSH 当转发壳。",
+    "ref_audio   : 克隆音色的参考音频（改它 = 换音色）。",
+    "prefer      : auto=DSH 通则用 DSH（默认，行为与改造前一致）/ local=强制本地 / dsh=强制 DSH。",
+    "排障：把 dsh_base 改成一个不通的端口（如 http://127.0.0.1:19999），",
+    "  就能模拟『DSH 不在』，验证球会不会自动切到本地 —— 全程不用真去关 DSH。"
+  ],
+  "endpoints": {
+    "dsh_base": "http://127.0.0.1:19387",
+    "local_base": "http://127.0.0.1:19388",
+    "indextts_url": "http://127.0.0.1:9881/tts",
+    "ref_audio": "<FAIRY_ROOT>\\voice\\index_voices\\fairy.wav",
+    "prefer": "auto"
+  },
+  "ball": {
+    "speak": true,
+    "bubble_seconds": 4,
+    "brief_seconds": 18
+  },
+  "advisor": {
+    "enabled": true,
+    "observe_min": 5,
+    "min_gap_min": 10
+  },
+  "balance": {
+    "warn_yuan": 30,
+    "alert_yuan": 10
+  },
+  "news": {
+    "count": 0,
+    "keyword_count": 0
+  },
+  "_windows_说明": [
+    "窗口对接（window_adapters.py）：自动发现窗口 -> 识别程序 -> 读内容 -> （授权后）操作。",
+    "① 白名单：只有这里 enabled=true 的程序才会被碰，没登记的窗口一律不碰。",
+    "② 默认只读：mode=read 只能看。要打字必须显式改成 write。",
+    "③ 点击更严：除了 mode=write，按钮名还必须写进 allow_click_names（默认空 = 一个都点不了）。",
+    "④ 全程日志：<FAIRY_ROOT>\\logs\\window_ops.jsonl。",
+    "加新程序 = 复制 _新增程序示例 那一条，改进程名即可。"
+  ],
+  "windows": {
+    "enabled": true,
+    "audit_log": true,
+    "_danger_words_说明": "命中这些词的动作（按钮/命令）一律要人确认后才执行。",
+    "danger_words": [
+      "发送",
+      "发出",
+      "提交",
+      "确定",
+      "确认",
+      "删除",
+      "清空",
+      "移除",
+      "卸载",
+      "支付",
+      "付款",
+      "购买",
+      "下单",
+      "转账",
+      "关闭",
+      "退出",
+      "结束",
+      "格式化",
+      "重启",
+      "关机",
+      "注销",
+      "恢复出厂",
+      "覆盖",
+      "替换"
+    ],
+    "programs": {
+      "dsh": {
+        "enabled": true,
+        "adapter": "dsh",
+        "mode": "read",
+        "match": {
+          "process": [
+            "DeepSeek Harness.exe"
+          ],
+          "class": [
+            "Chrome_WidgetWin_1"
+          ]
+        },
+        "note": "DeepSeek Harness：HTTP 接口读回复 + 会话投影读每轮问答 + 窗口 UIA 读正文，三通道互补。"
+      },
+      "doubao": {
+        "enabled": true,
+        "adapter": "doubao",
+        "mode": "write",
+        "match": {
+          "process": [
+            "Doubao.exe"
+          ]
+        },
+        "_mode_说明": "read=只能看（默认）· write=允许往输入框打字；点击操作由 allow_click_names 控制。",
+        "allow_click_names": [],
+        "note": "豆包 PC 客户端（Chromium 外壳）。输入框为 Tiptap/ProseMirror 结构，可直接写入；allow_click_names 为空时不执行任何点击（含发送）。"
+      },
+      "_新增程序示例": {
+        "enabled": false,
+        "adapter": "generic_uia",
+        "mode": "read",
+        "match": {
+          "process": [
+            "Weixin.exe"
+          ],
+          "class": [],
+          "title_regex": ""
+        },
+        "allow_click_names": [],
+        "note": "新软件照抄这条：process 填进程名（任务管理器里看），adapter 用 generic_uia 就能先读；要打字改 mode=write。"
+      }
+    }
+  }
+}

@@ -1,0 +1,177 @@
+{
+  "brain": {
+    "provider": "deepseek",
+    "ollama": {
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen2.5:7b"
+    },
+    "system_prompt": "你是FairyX，运行在用户的Windows电脑上，是用户的AI助手。负责：1)自然语言对话；2)通过工具操控电脑（软件、文件、窗口、截图、剪贴板、搜索、计算等）。需要执行电脑操作时，输出JSON动作块：<<<TOOL>>>{\"tool\":\"工具名\",\"params\":{...}}<<<END>>>。回复保持简洁、口语化、中文。",
+    "history_limit": 20,
+    "providers": [
+      {
+        "name": "Strata 176B（本地最强大脑，可选）",
+        "enabled": false,
+        "base_url": "http://127.0.0.1:8080/v1",
+        "model": "<Strata 模型名，如 qwen3.8-flash-next-unsloth-ud-iq4_xs>",
+        "api_key": "none",
+        "timeout": 600,
+        "max_tokens": 4096,
+        "strata": true,
+        "extra_body": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          },
+          "temperature": 0.3
+        },
+        "note": "Strata 拆分部署的大模型（如 Qwen3.8-Flash-Next 176B）。未运行时 FairyX 会自动拉起 run-*.bat（需在 paths.strata_dir 配置目录）；深思考任务可去掉 enable_thinking"
+      },
+      {
+        "name": "云端 API（示例）",
+        "enabled": false,
+        "base_url": "https://api.example.com/v1",
+        "model": "your-model",
+        "api_key": "<你的 API Key>",
+        "timeout": 120,
+        "max_tokens": 1024,
+        "extra_body": {},
+        "note": "任意 OpenAI 兼容云端接口示例：DeepSeek / OpenAI / 中转站等"
+      },
+      {
+        "name": "Ollama 本地模型",
+        "enabled": true,
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "<ollama 已 pull 的模型名>",
+        "api_key": "ollama",
+        "timeout": 300,
+        "max_tokens": 1024,
+        "extra_body": {},
+        "note": "ollama pull 后即可用；多个模型可复制多条"
+      }
+    ],
+    "active_provider": "",
+    "chain_note": "providers 顺序=优先级，第一个可用的大脑生效并记忆为 active_provider",
+    "strata_thinking": {
+      "simple": [
+        "等于",
+        "是多少",
+        "几点",
+        "日期",
+        "翻译",
+        "什么意思",
+        "定义",
+        "查一下",
+        "语法",
+        "怎么写",
+        "多少钱",
+        "回显",
+        "刚才"
+      ],
+      "hard": [
+        "为什么",
+        "怎么办",
+        "分析",
+        "对比",
+        "权衡",
+        "方案",
+        "建议",
+        "优化",
+        "调试",
+        "原理",
+        "创作",
+        "规划",
+        "区别",
+        "优缺点"
+      ],
+      "hard_min_len": 60,
+      "note": "Strata 176B 自适应思考配置：命中 simple 且不含调试类→直答秒回；命中 hard 或长问题→开思考链。可按需增删关键词"
+    }
+  },
+  "voice": {
+    "enabled": true,
+    "asr_mode": "whisper",
+    "whisper": {
+      "model_size": "small",
+      "language": "zh",
+      "download_root": "models/whisper",
+      "initial_prompt": "以下是普通话的句子，请用简体中文转写。"
+    },
+    "tts_voice": "zh-CN-XiaoxiaoNeural",
+    "vad_silence_sec": 2.0,
+    "max_record_sec": 15,
+    "active_profile": "fairy",
+    "profiles": {
+      "fairy": {
+        "label": "Fairy 本体音色",
+        "original_first": true,
+        "auto_ref": true,
+        "ref_audio": "",
+        "ref_text": "",
+        "emo_alpha": 1.0,
+        "edge_voice": "zh-CN-XiaoxiaoNeural"
+      },
+      "custom": {
+        "label": "自定义音色",
+        "original_first": false,
+        "auto_ref": false,
+        "ref_audio": "",
+        "ref_text": "",
+        "emo_alpha": 1.0,
+        "edge_voice": "zh-CN-YunxiNeural"
+      }
+    },
+    "engines": {
+      "indextts": {
+        "enabled": true,
+        "base_url": "http://127.0.0.1:9881",
+        "start_script": "<FairyX 根目录>/tools/indextts_start.py",
+        "device": "auto"
+      },
+      "edge": {
+        "enabled": true
+      }
+    }
+  },
+  "floating_ball": {
+    "size": 128,
+    "position_x": 180,
+    "position_y": 180
+  },
+  "safety": {
+    "confirm_dangerous": true
+  },
+  "model_assets": [
+    [
+      "示例模型1",
+      "<GGUF 绝对路径>",
+      16.0,
+      "大"
+    ],
+    [
+      "示例模型2（视觉）",
+      "<视觉模型 GGUF 绝对路径>",
+      4.7,
+      "中"
+    ]
+  ],
+  "paths": {
+    "llama_dir": "<llama.cpp 目录>",
+    "strata_dir": "<Strata 目录>",
+    "indextts_dir": "<IndexTTS checkpoints 目录>",
+    "comfy_models": [
+      "<ComfyUI models 目录>"
+    ],
+    "portable_dirs": [
+      "<绿色软件目录1>",
+      "<绿色软件目录2>"
+    ],
+    "dl_dir": "<模型下载目录>",
+    "dl_target_gb": 87.0,
+    "note": "专用目录/模型/绿色软件路径都在这里配置；未配置时各工具自动探测常见位置。dl_dir 配置后悬浮球会显示下载进度条"
+  },
+  "consent": {
+    "scan": false,
+    "install": false,
+    "system_change": false,
+    "note": "使用人授权：首次运行会弹窗询问。scan=允许扫描本机软件/硬件/文件；install=允许自动下载安装软件；system_change=允许修改系统设置。全部默认false，须使用人同意后开启"
+  }
+}

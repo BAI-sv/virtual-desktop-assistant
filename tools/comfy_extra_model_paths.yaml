@@ -1,0 +1,24 @@
+# 虚拟桌面助手 专用的 ComfyUI 模型路径映射
+# 用 --extra-model-paths-config 外挂，【不修改】用户原有的 ComfyUI 安装与配置。
+# 目的：<COMFY_ROOT> 本体模型目录是空的，真正的模型库在别处（把 base_path 改成你的模型库目录）
+fairy_models:
+    base_path: <COMFY_MODELS_DIR>
+    checkpoints: models/checkpoints
+    configs: models/configs
+    vae: models/vae
+    vae_approx: models/vae_approx
+    loras: models/loras
+    upscale_models: models/upscale_models
+    embeddings: models/embeddings
+    clip: models/clip
+    clip_vision: models/clip_vision
+    style_models: models/style_models
+    controlnet: models/controlnet
+    diffusion_models: models/diffusion_models
+    text_encoders: models/text_encoders
+    audio_encoders: models/audio_encoders
+    model_patches: models/model_patches
+    gligen: models/gligen
+    hypernetworks: models/hypernetworks
+    photomaker: models/photomaker
+    llm: models/LLM
