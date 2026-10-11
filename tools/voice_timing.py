@@ -1,4 +1,16 @@
 # -*- coding: utf-8 -*-
+"""
+voice_timing.py —— 量一次【真实的单条合成耗时】，并按长度分档给出投影
+
+【为什么要分档量，而不是只测几句】
+  主代理实测：短句 /api/fairy/say 只要 2.9~5.3 秒。
+  但我批量跑的时候发现约 28 秒/条 —— 因为要做的话术【更长】。
+  合成耗时和文本长度强相关，所以必须【按长度分档】量，投影才可信：
+      短  <=10 字 / 中  11~20 字 / 长  21~45 字
+
+【用法】 py -3.12 D:\\FAIRY\\tools\\voice_timing.py [每档条数，默认 3]
+【注意】会把量过的句子【一并写入缓存】（它们本来就是需要的，不浪费）
+"""
 import os
 import random
 import sys
@@ -6,6 +18,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_cache as vc
+
 
 def main():
     per = int(sys.argv[1]) if len(sys.argv) > 1 else 3
@@ -66,6 +79,7 @@ def main():
     have = len([1 for s in phrases if vc.sha_of(s) in idx])
     print("   已缓存 %d / %d 条，还差 %d 条" % (have, len(phrases), len(phrases) - have))
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

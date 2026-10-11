@@ -1,6 +1,6 @@
 ﻿@echo off
 
-"<USER_HOME>\AppData\Local\Programs\Python\Python312\pythonw.exe" "<FAIRY_ROOT>\tools\cpu_watch.py"
+"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\pythonw.exe" "D:\FAIRY\tools\cpu_watch.py"
 
-"<USER_HOME>\AppData\Local\Programs\Python\Python312\pythonw.exe" "<FAIRY_ROOT>\tools\health_check.py" --quiet --fast
+"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\pythonw.exe" "D:\FAIRY\tools\health_check.py" --quiet --fast
 

@@ -1,4 +1,31 @@
 # -*- coding: utf-8 -*-
+"""
+health_check.py —— Fairy 系统体检
+
+【用途】
+  1) 关机时自动跑一次（Windows 任务计划，触发源：事件 1074 = 系统关机）
+  2) 开机播报时读上次的结果，把问题念出来并给解决方法
+  3) 用户/DSH 随时手动跑： py -3.12 health_check.py
+     --quiet   只写报告，不打印
+     --speak   把结果交给球念出来（POST /api/fairy/say）
+     --fast    关机路径用：跳过全部 Windows 查询，只留本地端口/文件判断
+     --full    额外查"驱动陈旧 TOP"（多约 0.5~3 秒，**默认跳过**）
+
+【分层】本地层(原有 10 项) + 硬件层 hw_* + 系统核心层 sys_* + 软件层 sw_* + 应用层 app_*
+  实测耗时（2026-10-08 10:20 本机，端到端含 Python 启动）：
+    默认整跑 7.3 秒 / --full 7.8 秒 / --fast 1.9 秒 —— 都在 15 秒预算内。
+  注意：关机批处理 D:\\FAIRY\\tools\\shutdown_check.bat 现在调用的是 `--quiet`（没带 --fast），
+  所以关机时走的是 7.3 秒那条；想更快就在那行末尾加 --fast（Windows 关机只等几秒）。
+
+【设计原则】
+  · 每一项**独立判定**：某个服务没起不影响其他项
+  · 每项都给**具体的解决方法**（不是"出错了"这种废话）
+  · 报告写成 JSON 落盘：D:\\FAIRY\\logs\\health_last.json
+  · 关机路径必须**快**（--fast 跳过 Windows 层，目标 <3 秒）
+
+【退出码】
+  0 = 全好    1 = 有警告    2 = 有严重问题（方便任务计划判断）
+"""
 import glob
 import json
 import os
@@ -9,7 +36,7 @@ import sys
 import time
 import fairy_root
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）
 CREATE_NO_WINDOW = fairy_root.CREATE_NO_WINDOW
 
 LOG_DIR = fairy_root.LOGS
@@ -20,8 +47,10 @@ INDEX_BAK = os.path.join(fairy_root.VOICE, "voice_index.backup.json")
 CONF = fairy_root.BRIEFING_CONF
 BALL_POS = fairy_root.BALL_POS
 BALL_LOG = os.path.join(LOG_DIR, "fairy_ball.log")
-
-
+# ★★ 2026-10-10 修：球的实际日志叫 fairy_ball.py.log（fairy.py 按【脚本名】重定向 stdout），
+#   而且落在 BALL_LOG_DIR（= WORK_LOGS，通常是项目根的 logs）。原来写死 fairy_ball.log，
+#   文件根本不存在 -> 这项检查永远报「无日志（首次运行正常）」，把真报错吞了
+#   （health_last.json 里 ball_log=ok 却同时 app_log=warn，就是它）。
 BALL_LOGS = [
     os.path.join(fairy_root.BALL_LOG_DIR, "fairy_ball.py.log"),
     os.path.join(fairy_root.BALL_LOG_DIR, "fairy_ball.log"),
@@ -31,18 +60,21 @@ BALL_LOGS = [
 BALL_PY = os.path.join(fairy_root.TOOLS, "fairy_ball.py")
 DSH = 19387
 
-
+# 结果：每项 {id, name, level, detail, fix}
+#   level: ok / warn / bad
 R = []
 
-
+# --fast：关机路径用。跳过要查事件日志的慢层（Windows 关机只等几秒）
 FAST = '--fast' in sys.argv
-
+# --full：额外查"驱动陈旧 TOP"（唯一超过 3 秒的新增项，默认跳过）
 FULL = '--full' in sys.argv
-
+# 桌面球 PID（check_ball 填，应用层 check_app_proc 读）
 BALL_PIDS = []
+
 
 def add(i, name, level, detail, fix=""):
     R.append({"id": i, "name": name, "level": level, "detail": detail, "fix": fix})
+
 
 def port_open(p, host="127.0.0.1", t=0.6):
     s = socket.socket()
@@ -52,6 +84,7 @@ def port_open(p, host="127.0.0.1", t=0.6):
     finally:
         s.close()
 
+
 def http_ok(path, timeout=2.5):
     try:
         import urllib.request
@@ -60,16 +93,18 @@ def http_ok(path, timeout=2.5):
     except Exception as e:
         return False, str(e)
 
+
 def ps(cmd, t=8):
     try:
-
-
+        # ★ 2026-10-10【黑窗】见 fairy_root.NOWIN_FLAGS 的说明。本脚本常被
+        #   pythonw / 计划任务 FairyShutdownCheck 起（无控制台）-> 不加就弹窗。
         r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
                            capture_output=True, timeout=t,
                            creationflags=CREATE_NO_WINDOW)
         return (r.stdout or b"").decode("gbk", "replace")
     except Exception:
         return ""
+
 
 def ball_running():
     out = ps("Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
@@ -78,6 +113,7 @@ def ball_running():
     return [x.strip() for x in out.splitlines() if x.strip()]
 
 
+# ---------------------------------------------------------------- 各项检查
 def check_dsh():
     if not port_open(DSH):
         add("dsh", "DSH 服务(19387)", "bad", "端口没开",
@@ -95,20 +131,21 @@ def check_dsh():
     vc = j.get("voiceCount")
     if vc == 0:
         add("dsh", "DSH 服务(19387)", "warn", "插件在跑但 voiceCount=0（语料库没读到）",
-            "检查 <FAIRY_ROOT>\\voice\\voice_index.json 是否存在且能被解析")
+            "检查 D:\\FAIRY\\voice\\voice_index.json 是否存在且能被解析")
     else:
         add("dsh", "DSH 服务(19387)", "ok", "正常，语料 %s 条，帧 %s" % (vc, j.get("frames")))
 
-def check_services():
 
+def check_services():
+    # 语音：走用户装的 TTS 插件
     ok, _ = http_ok("/dsh-tts-api/diagnose", timeout=4)
     if ok:
         add("tts", "语音合成(TTS 插件)", "ok", "可用")
     else:
         add("tts", "语音合成(TTS 插件)", "warn", "接口不通",
             "DSH 重启后插件可能没起；或 TTS 插件未启用")
-
-
+    # ★★ 2026-10-10 晚改口：IndexTTS(9881) 现在是【球的首选音色引擎】（克隆音色），
+    #   不再是"用户说不用了、在跑只是占显存"。原提示会劝人把嗓子关掉 —— 与现状相反。
     if port_open(9881):
         add("indextts", "IndexTTS(9881)", "ok", "在跑（球的首选音色引擎，占显存约 2-4GB）",
             "想省显存：球上右键「停止本地运算」；停了语音会退回克隆缓存/云端音色")
@@ -117,10 +154,11 @@ def check_services():
             "刚点过「停止本地运算」属正常；否则跑 %s 拉起（守护正常时会自己拉）"
             % os.path.join(fairy_root.TOOLS, "indextts_start.py"))
 
+
 def check_corpus():
     if not os.path.exists(INDEX):
         add("corpus", "游戏原声语料库", "bad", "voice_index.json 不存在",
-            "跑 <FAIRY_ROOT>\\tools\\extend_voice_index.py 重建，或用备份 %s 恢复" % INDEX_BAK)
+            "跑 D:\\FAIRY\\tools\\extend_voice_index.py 重建，或用备份 %s 恢复" % INDEX_BAK)
         return
     try:
         j = json.load(open(INDEX, encoding="utf-8"))
@@ -138,16 +176,17 @@ def check_corpus():
         add("corpus_bak", "语料库备份", "warn", "没有备份文件",
             "复制一份：copy %s %s" % (INDEX, INDEX_BAK))
 
+
 def check_ball():
     global BALL_PIDS
     pids = ball_running()
     BALL_PIDS = pids
     if not pids:
         add("ball", "桌面球进程", "bad", "没在跑",
-            "启动：pythonw <FAIRY_ROOT>\\tools\\fairy_ball.py（或检查开机自启）")
+            "启动：pythonw D:\\FAIRY\\tools\\fairy_ball.py（或检查开机自启）")
         return
     add("ball", "桌面球进程", "ok", "在跑 (PID %s)" % ",".join(pids))
-
+    # 球日志里有没有崩溃痕迹
     logp = None
     for _p in BALL_LOGS:
         try:
@@ -168,11 +207,12 @@ def check_ball():
         else:
             add("ball_log", "球运行日志", "ok", "无报错（%s）" % os.path.basename(logp))
     except Exception as e:
-
+        # ★ 读不了也算警告：原来这里 except -> ok，等于把故障吞成"正常"
         add("ball_log", "球运行日志", "warn", "日志读不了：%s" % str(e)[:60], "检查 %s 权限/占用" % logp)
     if not os.path.exists(BALL_PY):
         add("ball_src", "球脚本", "bad", "fairy_ball.py 不见了",
-            "从 <WORKDIR>\\fairy_ball.py 拷回 <FAIRY_ROOT>\\tools\\")
+            "从 E:\\Downloads\\fairy\\fairy_ball.py 拷回 D:\\FAIRY\\tools\\")
+
 
 def check_config():
     if not os.path.exists(CONF):
@@ -193,6 +233,7 @@ def check_config():
         add("pos", "球位置存档", "warn", "fairy_ball_pos.json 不存在（球会回到默认位置）",
             "拖动球到想要的位置即可自动保存")
 
+
 def check_autostart():
     out = ps('Get-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" | '
              'Select-Object -Property * | Out-String -Width 200')
@@ -202,9 +243,10 @@ def check_autostart():
             miss.append(key)
     if miss:
         add("autostart", "开机自启", "warn", "缺少自启项：%s" % "、".join(miss),
-            "跑 py -3.12 <WORKDIR>\\autostart.py enable")
+            "跑 py -3.12 E:\\Downloads\\fairy\\autostart.py enable")
     else:
         add("autostart", "开机自启", "ok", "FairyDSH + FairyBall 都在")
+
 
 def check_disk():
     for drv in ("C:", "D:"):
@@ -214,7 +256,7 @@ def check_disk():
             free_gb = u.free / (1024 ** 3)
             if free_gb < 5:
                 add("disk" + drv[0], "%s 盘剩余空间" % drv, "bad", "只剩 %.1f GB" % free_gb,
-                    "清理空间；日志在 <FAIRY_ROOT>\\logs，可删旧文件")
+                    "清理空间；日志在 D:\\FAIRY\\logs，可删旧文件")
             elif free_gb < 15:
                 add("disk" + drv[0], "%s 盘剩余空间" % drv, "warn", "只剩 %.1f GB" % free_gb,
                     "留意清理")
@@ -223,17 +265,39 @@ def check_disk():
         except Exception:
             pass
 
+
 def check_pending():
+    """有没有跑了一半的活儿（比如补索引没跑完）。"""
     log = os.path.join(LOG_DIR, "extend_index.log")
     if os.path.exists(log):
         try:
             t = open(log, encoding="utf-8", errors="replace").read()
             if "完成：新增" not in t and "没有要补的" not in t:
                 add("pending", "未完成的任务", "warn", "补索引好像没跑完",
-                    "重跑：py -3.12 <FAIRY_ROOT>\\tools\\extend_voice_index.py")
+                    "重跑：py -3.12 D:\\FAIRY\\tools\\extend_voice_index.py")
         except Exception:
             pass
 
+
+
+
+# ==========================================================================
+# ==========================================================================
+# 全栈扩展：硬件层 / 系统核心层 / 软件层
+#
+# 【性能设计】所有 Windows 查询**合并成一次 PowerShell 调用**，返回一个 JSON。
+#   为什么：PowerShell 每次启动约 0.4~0.6 秒，分 10 次查就是 5 秒以上，
+#   而关机路径要求 <8 秒。合并成一次后，整份体检的 Windows 部分 ≈ 2~4 秒。
+#   `--fast` 时**完全跳过**这次调用（只留本地端口/文件判断），关机<1 秒。
+#
+# 【白名单】有些日志是**无害噪音**，实测确认过，不能当问题报：
+#   Service Control Manager 7001  = "客户体验改善计划的用户登录通知"，每次启动都写
+#   Security-SPP 16385            = 激活服务安排重启失败，反复刷但不影响使用
+#   DistributedCOM 10010          = COM 组件超时，很常见
+#   Kernel-Boot 153               = "基于虚拟化的安全性 disabled"，这是**正常启动信息**
+#   Bonjour Service 100 / Defrag 264
+#   → 这些从"日志错误分组"里剔除；磁盘错误查询用 Id 7/11/51，本来就不含 153。
+# ==========================================================================
 
 NOISE = (
     "Service Control Manager, 7001",
@@ -244,7 +308,16 @@ NOISE = (
     "Defrag, 264",
 )
 
-
+# 一次 PowerShell 调用取回全部系统数据（转成 JSON，UTF-8）
+# ★ 每一段各自 try/catch，绝不能再整块包一个 try。
+#   注意：整块一个 try 时，`node -v` 抛
+#   CommandNotFoundException（本机 PATH 里没有 node）被末尾的 catch 吞掉，
+#   于是它**后面所有字段**（sys_err/app_err/unexpected/power/whea/diskerr/
+#   minidump/memdmp/reboot/crash_top）全都没赋值，报告一律显示成 0/"无"：
+#   实测真值是 6008 意外关机 ×22、WHEA ×11、磁盘错误(Id 7/11/51) ×93、
+#   Application Error ×247 —— 全被这条假阴性掩盖。分段后互不影响。
+#   ⚠ 补充（2026-10-08 复查）：那 93 条磁盘错误**全部指向 \Device\Harddisk4**，
+#     而本机 Get-Disk 只有 0~3 —— 是幽灵设备记录。下方 diskerr 查询已改为按设备过滤。
 SYS_JSON = r'''
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $ErrorActionPreference='SilentlyContinue'
@@ -303,6 +376,12 @@ try {
   $o.whea=$w.Count
   if($w.Count -gt 0){ $o.whea_last=$w[0].TimeCreated.ToString('yyyy-MM-dd HH:mm') }
 } catch {}
+# ★ 磁盘类错误必须【按设备过滤】，否则会误报狼来了。
+#   2026-10-08 实测：93 条 Id 7/11/51 全部指向 \Device\Harddisk4，
+#   而本机 Get-Disk 的 Number 只有 0~3 —— Harddisk4 根本不存在
+#   （多半是当时插过的移动盘/虚拟盘）。不过滤的话每次都报
+#   "✗ 严重 磁盘错误事件…立刻备份并准备换盘"，既误导又让真问题失去可信度。
+#   分不出设备的事件【保守算真实错误】，绝不静默丢弃。
 try {
   $exist=@(Get-Disk -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Number)
   $o.disknum=($exist -join ',')
@@ -335,7 +414,11 @@ DRV_SLOT
 $o | ConvertTo-Json -Depth 5 -Compress
 '''
 
-
+# --full 才追加：第三方驱动清单（Win32_PnPSignedDriver 约 3 秒，最慢的新增项）
+#   DriverDate 在 CIM 里已经是 DateTime（实测 GetType()=System.DateTime），
+#   直接排序即可；早先按 DMTF 字符串解析会抛"参数超出有效值范围"。
+#   ★ 注意 `Sort-Object y` 对 [ordered]@{} 这种字典**不生效**（实测排不出来，
+#     顺序还是枚举顺序），必须写成 `Sort-Object {$_['y']}` 才真的按年份排。
 DRV_JSON = r'''
 try {
   $o.drv=@(Get-CimInstance Win32_PnPSignedDriver | Where-Object {$_.DeviceName -and $_.DriverProviderName -ne 'Microsoft'} | ForEach-Object {
@@ -346,10 +429,12 @@ try {
 } catch {}
 '''
 
-SYS = {}
-SYS_ERR = ""
+SYS = {}      # 一次取回的系统数据；--fast 时为空
+SYS_ERR = ""  # 取不到的原因
+
 
 def ps_json(script, t=45):
+    """跑 PowerShell 并把 stdout 当 JSON 解析。失败返回 (None, 原因)。"""
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
                            capture_output=True, timeout=t,
@@ -364,18 +449,24 @@ def ps_json(script, t=45):
     except Exception as e:
         return None, "%s: %s" % (type(e).__name__, str(e)[:60])
 
+
 def _safe(fn):
+    """跑一个检查函数，出错就记一条警告（不炸整体）。"""
     try:
         fn()
     except Exception as e:
         add(fn.__name__, fn.__name__, "warn", "检查本身出错: %s" % str(e)[:60], "忽略即可")
 
+
 def _load_sys(t=45):
+    """在线程里装载系统数据（和本地检查并行跑，省时间）。"""
     global SYS, SYS_ERR
     SYS, SYS_ERR = ps_json(SYS_JSON.replace("DRV_SLOT", DRV_JSON if FULL else ""), t=t)
     SYS = SYS or {}
 
+
 def _sys_ok(tag):
+    """系统数据是否可用。--fast 时不算问题（故意不查）。"""
     if SYS:
         return True
     if FAST:
@@ -384,26 +475,29 @@ def _sys_ok(tag):
         "手动跑一次 py -3.12 health_check.py 看报错；确认 PowerShell 没被组策略限制")
     return False
 
+
 def _noise(key):
     return any(x in key for x in NOISE)
 
 
+# ------------------------------------------------------------------ 硬件层
 def check_hardware():
+    """硬件层：CPU / 内存(含 XMP) / 显卡 / 物理盘。"""
     if not _sys_ok("hw"):
         return
-
+    # CPU
     name = (SYS.get("cpu_name") or "").strip()
     cores, thr = SYS.get("cpu_cores"), SYS.get("cpu_threads")
     load = SYS.get("cpu_load")
     lv = "warn" if (isinstance(load, int) and load >= 90) else "ok"
     add("hw_cpu", "CPU", lv, "%s · %s核%s线程 · 负载 %s%%" % (name[:34], cores, thr, load),
         "持续 90%+ 时查是不是有失控进程" if lv != "ok" else "")
-
+    # 内存占用
     tot, free, pct = SYS.get("ram_total"), SYS.get("ram_free"), SYS.get("ram_used_pct")
     lv = "bad" if (isinstance(pct, int) and pct >= 97) else ("warn" if (isinstance(pct, int) and pct >= 90) else "ok")
     add("hw_ram", "内存占用", lv, "%s%%（已用 %.1f GB / 共 %s GB，%s 条）" % (pct, (tot or 0) - (free or 0), tot, SYS.get("ram_sticks")),
         "接近满载：关掉不用的程序，或查内存泄漏" if lv != "ok" else "")
-
+    # ★ 内存频率：Speed 是标称，ConfiguredClockSpeed 是实跑。不等 = BIOS 没开 XMP/DOCP
     spd, cfg = SYS.get("ram_speed"), SYS.get("ram_cfg")
     if spd and cfg:
         if str(spd) == str(cfg):
@@ -411,9 +505,9 @@ def check_hardware():
         else:
             add("hw_ram_xmp", "内存频率", "warn", "实跑 %s MHz < 标称 %s MHz" % (cfg, spd),
                 "进 BIOS 打开 XMP/DOCP（微星叫 A-XMP）；不开会白丢约 30%% 内存带宽")
-
+    # 显卡
     add("hw_gpu", "显卡", "ok", "%s · 驱动 %s（%s）" % (SYS.get("gpu"), SYS.get("gpu_drv"), SYS.get("gpu_date")))
-
+    # 物理盘
     disks = SYS.get("disks") or []
     bad = [d for d in disks if (d.get("h") or "") != "Healthy"]
     if bad:
@@ -424,10 +518,12 @@ def check_hardware():
             len(disks), "、".join("%s %sG" % ((d.get("m") or "?")[:4], d.get("gb")) for d in disks[:4])))
 
 
+# -------------------------------------------------------------- 系统核心层
 def check_system():
+    """系统核心层：日志错误分组（带白名单）/ 意外关机 / 异常断电 / WHEA / 蓝屏 / 待重启 / 磁盘错误。"""
     if not _sys_ok("sys"):
         return
-
+    # 日志错误分组：剔除白名单后，取最严重的那组
     for tag, key, label in (("sys_err", "sys_err", "系统日志错误"), ("app_err", "app_err", "应用日志错误")):
         groups = [g for g in (SYS.get(key) or []) if not _noise(g.get("k") or "")]
         if groups:
@@ -438,7 +534,7 @@ def check_system():
         else:
             add(tag, label, "ok", "近7天无（非白名单）严重/错误事件")
 
-
+    # ★ WHEA 硬件错误 —— 意外关机最硬的证据
     n = SYS.get("whea") or 0
     if n:
         add("sys_whea", "★WHEA 硬件错误", "bad",
@@ -454,17 +550,19 @@ def check_system():
     else:
         add("sys_whea", "WHEA 硬件错误", "ok", "60 天 0 条（无硬件级报错）")
 
-
+    # 异常断电
     n = SYS.get("power") or 0
     add("sys_power", "异常断电", "bad" if n else "ok", "%d 次（60天）" % n,
         "有 Kernel-Power 41/42 说明断电/电源/线材问题，查插座与电源" if n else "")
 
-
+    # 意外关机
     n = SYS.get("unexpected") or 0
     add("sys_shutdown", "意外关机", "warn" if n else "ok", "%d 次（30天）" % n,
         "非正常关机。对照 WHEA：若同时有硬件错误，先修 CPU/内存稳定性" if n else "")
 
-
+    # 磁盘类错误（7/11/51 = 坏道/IO 重试）
+    #   ★ 分两类：落在【现有磁盘】上的才算严重；指向"当前不存在的设备"的降为通过并注明，
+    #     否则每次开机都报一条假的"立刻备份准备换盘"（狼来了）。
     n = SYS.get("diskerr") or 0
     g = SYS.get("diskerr_ghost") or 0
     gdev = (SYS.get("diskerr_ghostdev") or "").strip()
@@ -480,7 +578,7 @@ def check_system():
     else:
         add("sys_diskerr", "磁盘错误事件", "ok", "Id 7/11/51 共 0 条（30天）")
 
-
+    # 蓝屏
     md, mem = SYS.get("minidump") or 0, SYS.get("memdmp")
     if md or mem:
         add("sys_bsod", "蓝屏转储", "warn", "%d 个 minidump%s" % (md, " + MEMORY.DMP" if mem else ""),
@@ -488,14 +586,16 @@ def check_system():
     else:
         add("sys_bsod", "蓝屏转储", "ok", "无 minidump、无 MEMORY.DMP")
 
-
+    # 待重启（三类标记都查：CBS 组件更新 / WU 自动更新 / 待替换文件）
     rb = (SYS.get("reboot") or "").strip()
     add("sys_reboot", "待重启更新", "warn" if rb else "ok",
         ("待重启标记：" + rb) if rb else "无（CBS / WindowsUpdate / 待替换文件 都没有）",
         "尽快重启让补丁或驱动替换生效；若 PendingFileRename 长期不清，查是不是某软件反复写它" if rb else "")
 
 
+# ------------------------------------------------------------------ 软件层
 def check_software():
+    """软件层：异常 PnP 设备 / 磁盘 SMART / 运行环境版本。"""
     if not _sys_ok("soft"):
         return
     badpnp = [x for x in (SYS.get("badpnp") or []) if x]
@@ -505,7 +605,7 @@ def check_software():
     else:
         add("sw_pnp", "异常设备(驱动)", "ok", "无黄色感叹号设备")
 
-
+    # SMART（这项最值钱：能提前发现盘要坏）
     sm = SYS.get("smart") or []
     if not sm:
         add("sw_smart", "磁盘 SMART", "warn", "取不到（需管理员权限或盘不支持）",
@@ -526,12 +626,14 @@ def check_software():
     add("sw_py", "Python", "ok" if "3.12" in py else "warn", py[:40] or "取不到",
         "Fairy 全栈依赖 Python 3.12，版本不对会各种报错" if "3.12" not in py else "")
     nd = (SYS.get("node") or "").strip()
-
-
+    # ★ 降级为 ok：DSH 自带 node（在同级 runtime 目录里），系统 PATH 里没有是【正常状态】。
+    #   先前每次体检都报一条"警告 Node 取不到"，属于已知无害的假警告。
     add("sw_node", "Node", "ok",
         nd[:30] if nd.startswith("v") else "不在系统 PATH（DSH 自带，不影响运行）")
 
+
 def check_app_crashes():
+    """软件层：近 30 天崩溃最多的应用。"""
     if not _sys_ok("crash"):
         return
     top = SYS.get("crash_top") or []
@@ -546,7 +648,9 @@ def check_app_crashes():
         "多为推理库版本冲突，可禁用它的 AI 功能止血" if lv != "ok" else "")
 
 
+# ------------------------------------------------------------------ 应用层
 def check_app_proc():
+    """应用层：关键进程在不在（DSH 主程序 / 桌面球 / 本地大脑）。"""
     if not _sys_ok("app"):
         return
     names = [(p.get("n") or "") for p in (SYS.get("proc") or [])]
@@ -560,21 +664,32 @@ def check_app_proc():
             "DSH 主程序 ×%d · 桌面球 ×%d · 本地大脑 ×%d（本地大脑按需启动，没起不影响 DSH 云端）"
             % (dsh, len(BALL_PIDS), brain))
 
+
 LOG_ERR = re.compile(r"Traceback|Error|Exception|CRITICAL|错误|失败|拒绝连接|WinError", re.I)
-
+# 名字像日志但不是【运行日志】的文件：AI 生成的文本里天然有"错误/Error"字样，会造成误报
 LOG_SKIP = ("ai_opinion", "second_opinion", "opinion_", "mce_amd", "cpuz_report")
-
-
+# 已停用组件的残留日志：IndexTTS 已不再使用（语音改走 DSH 的 TTS 插件），
+# 但 indextts_out.log 里会**永远**留着 48 行真的 RuntimeError。
+# 每次体检都报它 = 狼来了（和 Node 那条同类）。仅这两条，不做通用排除。
 LOG_SKIP_STALE = ("indextts_out", "indextts_err")
 
+
 def _read_text(p):
+    """日志编码不定（有 UTF-8 也有 GBK），先 UTF-8 再 GBK。"""
     b = open(p, "rb").read()
     try:
         return b.decode("utf-8")
     except Exception:
         return b.decode("gbk", "replace")
 
+
 def check_app_log():
+    """应用层：Fairy 自己的日志里有没有报错（只看近 7 天的 *.log，不碰 .txt 试验输出）。
+
+    ★ 排除清单：有些文件名字是 .log，内容却是【AI 生成的文本】而不是运行日志 ——
+      实测 `ai_opinion.log` / `second_opinion_*.log` 里写的是大模型对硬件问题的分析意见，
+      里面自然会出现"错误/Error"这类词，于是被误当成"Fairy 日志报错"报警。
+    """
     newest, scanned, stale = None, 0, 0
     for p in glob.glob(os.path.join(LOG_DIR, "*.log")):
         base = os.path.basename(p).lower()
@@ -601,7 +716,9 @@ def check_app_log():
             "%s：%d 行报错，最后一行「%s」" % (os.path.basename(newest[1]), newest[2], newest[3]),
             "看 %s 定位；IndexTTS 的残留日志可忽略（在用语音走 DSH 的 TTS 插件）" % newest[1])
 
+
 def check_drivers():
+    """软件层（--full）：第三方驱动陈旧 TOP。默认跳过——这是最慢的新增项（约 3 秒）。"""
     if not FULL:
         return
     if not _sys_ok("drv"):
@@ -609,9 +726,9 @@ def check_drivers():
     drv = [d for d in (SYS.get("drv") or []) if d.get("d")]
     if not drv:
         add("sw_drv", "驱动陈旧 TOP", "warn", "取不到第三方驱动清单（WMI 受限或需要管理员）",
-            "管理员身份跑：py -3.12 <FAIRY_ROOT>\\tools\\health_check.py --full")
+            "管理员身份跑：py -3.12 D:\\FAIRY\\tools\\health_check.py --full")
         return
-
+    # 不信任 PowerShell 那边的顺序，这里再取一次最小的年份（双保险）
     oldest = min(drv, key=lambda d: int(d.get("y") or 9999))
     age = max(0, int(time.strftime("%Y")) - int(oldest.get("y") or time.strftime("%Y")))
     lst = "、".join("%s %s" % ((d.get("n") or "?")[:20], d.get("d")) for d in drv[:3])
@@ -624,19 +741,25 @@ def check_drivers():
             "最旧 %d 年：%s（共 %d 个第三方驱动）" % (age, lst, len(drv)))
 
 
+# ---------------------------------------------------------------- 主流程
 def main():
     global SYS, SYS_ERR
     t0 = time.time()
     os.makedirs(LOG_DIR, exist_ok=True)
 
-
+    # 【并行】把唯一那次 PowerShell 查询丢到线程里，主线程同时跑本地检查。
+    #   PowerShell 查询约 6~7 秒（事件日志聚合是主要开销），本地检查约 1~2 秒，
+    #   两者重叠后总耗时 ≈ PowerShell 那次，而不是相加。
     import threading
     th = None
     if not FAST:
         th = threading.Thread(target=_load_sys, kwargs={"t": 45}, daemon=True)
         th.start()
 
-
+    # 本地快检查：彼此**互不依赖**，所以全部并行开线程。
+    #   （慢点在于 check_ball / check_autostart 各起一次 PowerShell、
+    #     check_services 要跑 TTS 自检约 1 秒 —— 串起来就是 4~5 秒，并行后≈最慢那个）
+    #   R.append 在 CPython 里是原子的，多线程写这个 list 安全。
     local = (check_dsh, check_services, check_corpus, check_ball,
              check_config, check_autostart, check_disk, check_pending)
     ths = []
@@ -645,14 +768,14 @@ def main():
         th2.start()
         ths.append(th2)
 
-
+    # 等系统数据到位（它和上面这些是并行跑的）
     if th is not None:
         th.join(timeout=50)
     for fn in (check_hardware, check_software, check_system, check_app_crashes, check_drivers):
         _safe(fn)
     for th2 in ths:
         th2.join(timeout=60)
-
+    # 这两项依赖前面的结果（桌面球 PID / 系统数据），本身不再起 PowerShell，很便宜
     for fn in (check_app_proc, check_app_log):
         _safe(fn)
 
@@ -672,8 +795,9 @@ def main():
             os.replace(REPORT, REPORT_BAK)
         except Exception:
             pass
-
-
+    # ★ 原子写入：先写 .tmp 再 os.replace。
+    #   直接覆盖时，球正好在读到一半会 JSONDecodeError → 静默不播报。
+    #   失败要打印，不许静默（静默兜底会把 bug 藏起来）。
     tmp = REPORT + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -683,22 +807,23 @@ def main():
         print("[health] 报告写入失败: %s" % e, flush=True)
 
     if "--quiet" not in sys.argv:
-
-
+        # ★ 输出编码：stdout 被重定向（任务计划、管道、抓日志）时 Python 用 GBK，
+        #   打印 "✗" 会直接 UnicodeEncodeError 崩掉。
+        #   控制台里 Python 本来就是 utf-8，这里 reconfigure 是安全的。
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
         print("Fairy 全栈体检  %s  （%.2fs%s）" % (rep["time"], rep["elapsed"], "  快模式" if FAST else ""))
-
+        # 严重和警告集中列在前面，通过项按层汇总
         for lv, tag in (("bad", "✗ 严重"), ("warn", "! 警告")):
             for x in R:
                 if x["level"] == lv:
                     print("  %s  %s：%s" % (tag, x["name"], x["detail"]))
                     if x["fix"]:
                         print("        解决办法：%s" % x["fix"])
-
-
+        # 分层小计必须自洽：硬件+系统+软件+应用+本地 = 总数
+        #   （先前只列了 4 个新层，打印 23 而总数 32 —— 漏了原有的 10 项本地层）
         _other = sum(1 for x in R if not any(x["id"].startswith(k) for k in layers))
         print("  " + " · ".join("%s %d 项" % (v, sum(1 for x in R if x["id"].startswith(k)))
                                 for k, v in layers.items())
@@ -734,6 +859,7 @@ def main():
             pass
 
     return 2 if bad else (1 if warn else 0)
+
 
 if __name__ == "__main__":
     sys.exit(main())

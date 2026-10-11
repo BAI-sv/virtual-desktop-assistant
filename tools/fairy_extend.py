@@ -1,5 +1,21 @@
 # -*- coding: utf-8 -*-
-
+# FairyX 设备扩展服务
+# ------------------------------------------------------------------
+# 安装后自动检测附近设备 + 双向"向外扩展"：
+#   1) 自动检测：后台线程周期调 device_adapters.discover_all()，形成持久化设备池
+#      （data/devices.json，去重 / 上线 / 下线 / 首见时间 / 在线状态）
+#   2) 大脑接入：HTTP 暴露设备池，大脑可直接查询设备、触发扫描、向设备发指令
+#   3) 外部接入：HTTP 服务（默认 0.0.0.0:8090）让手机 / 手表 / 另一台电脑接入 FairyX
+#      查询设备、控制设备、主动注册为 FairyX 的外接设备
+#
+# 用法：
+#   py -3.12 fairy_extend.py --run        常驻（自动检测 + HTTP 服务）
+#   py -3.12 fairy_extend.py --scan       单次扫描并打印设备池
+#   py -3.12 fairy_extend.py --list       查看当前设备池
+#   py -3.12 fairy_extend.py --stop       优雅停止（读 pid 结束）
+#   py -3.12 fairy_extend.py --selftest   自检（扫描 + HTTP 连通）
+#
+# 设计原则（沿用项目风格）：能不动就不动；独立进程，不侵入 fairy_ball.py 核心。
 
 import os
 import sys
@@ -11,19 +27,19 @@ import importlib.util
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(HERE)                       # FairyX 根目录（tools/ 上一级）
 DATA_DIR = os.path.join(ROOT, "data")
 LOG_DIR = os.path.join(ROOT, "logs")
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 PID_FILE = os.path.join(DATA_DIR, "fairy_extend.pid")
 LOG_FILE = os.path.join(LOG_DIR, "fairy_extend.log")
 
-
+# 运行配置（改这里即可，不读外部配置文件以免耦合）
 CONF = {
-    "host": "0.0.0.0",
+    "host": "0.0.0.0",          # 对外开放；只给自己用可改成 127.0.0.1
     "port": 8090,
-    "scan_interval": 60,
-    "device_ttl": 300,
+    "scan_interval": 60,        # 后台自动扫描间隔（秒）
+    "device_ttl": 300,          # 超过多久没再发现 → 判离线（秒）
 }
 
 _lock = threading.Lock()
@@ -31,7 +47,16 @@ _stop_evt = threading.Event()
 _started = time.time()
 
 
+# --------------------------------------------------------------------------
+# 设备池
+# --------------------------------------------------------------------------
 class DeviceRegistry:
+    """内存 + 落盘(data/devices.json)的设备池。
+
+    key = 设备 id（lan:mac / ble:addr / audio:name / serial:dev / sle:addr / ext:注册名）
+    每台记录：
+      {id,name,kind,ip,mac,rssi,adapter,online,first_seen,last_seen,meta}
+    """
 
     def __init__(self, data_file):
         self._file = data_file
@@ -68,6 +93,7 @@ class DeviceRegistry:
             pass
 
     def upsert_many(self, found):
+        """合并一次发现结果。found: discover_all() 返回的 list[dict]。"""
         now = time.time()
         seen = set()
         added, updated, gone = 0, 0, 0
@@ -90,7 +116,7 @@ class DeviceRegistry:
                     self._devs[did]["last_seen"] = now
                     self._devs[did]["online"] = True
                     updated += 1
-
+            # 判离线：有记录但本次没出现，且超过 TTL
             for did in list(self._devs.keys()):
                 rec = self._devs[did]
                 if rec.get("online") and did not in seen:
@@ -113,6 +139,7 @@ class DeviceRegistry:
             return self._devs.get(did)
 
     def register_external(self, name, meta=None):
+        """外部设备主动注册接入 FairyX（手机/手表/其他电脑）。"""
         did = "ext:%s" % name
         now = time.time()
         with _lock:
@@ -131,7 +158,11 @@ class DeviceRegistry:
         return rec
 
 
+# --------------------------------------------------------------------------
+# 加载 device_adapters（按路径加载，与项目其它模块风格一致）
+# --------------------------------------------------------------------------
 _ADAPTERS = None
+
 
 def _adapters():
     global _ADAPTERS
@@ -144,6 +175,9 @@ def _adapters():
     return _ADAPTERS
 
 
+# --------------------------------------------------------------------------
+# 后台自动扫描
+# --------------------------------------------------------------------------
 class Scanner:
     def __init__(self, registry):
         self._reg = registry
@@ -174,6 +208,9 @@ class Scanner:
         return self.scan_once()
 
 
+# --------------------------------------------------------------------------
+# HTTP 接入服务
+# --------------------------------------------------------------------------
 def _json(obj, code=200, extra=None):
     body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -186,6 +223,7 @@ def _json(obj, code=200, extra=None):
         headers.update(extra)
     return code, headers, body
 
+
 def _read_body(handler):
     try:
         n = int(handler.headers.get("Content-Length") or 0)
@@ -196,13 +234,14 @@ def _read_body(handler):
     except Exception:
         return {}
 
+
 class ExtHandler(BaseHTTPRequestHandler):
-    registry = None
+    registry = None   # 由外部注入
     scanner = None
     server_version = "FairyExt/1.0"
 
     def log_message(self, *a):
-        pass
+        pass  # 静默，避免刷屏
 
     def _send(self, code, headers, body):
         self.send_response(code)
@@ -300,6 +339,9 @@ class ExtHandler(BaseHTTPRequestHandler):
         self._send(*_json({"ok": True, "device": rec}))
 
 
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
 def _print(s=""):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -309,6 +351,7 @@ def _print(s=""):
         print(s)
     except Exception:
         print(str(s).encode("utf-8", "replace").decode("utf-8", "replace"))
+
 
 def run_server(reg, scanner):
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -333,6 +376,7 @@ def run_server(reg, scanner):
         except Exception:
             pass
 
+
 def _lan_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -343,12 +387,14 @@ def _lan_ip():
     except Exception:
         return None
 
+
 def _find_pid():
     try:
         with open(PID_FILE) as f:
             return int(f.read().strip())
     except Exception:
         return None
+
 
 def _stop():
     pid = _find_pid()
@@ -360,6 +406,7 @@ def _stop():
             _print("停止失败: %s" % e)
     else:
         _print("没有运行中的服务（无 pid）")
+
 
 def main():
     a = sys.argv[1:]
@@ -393,7 +440,7 @@ def main():
         r = scanner.scan_once()
         _print("扫描: %s" % r)
         _print("设备池: %d 台" % len(reg.list()))
-
+        # HTTP 连通自检
         import urllib.request
         try:
             with urllib.request.urlopen("http://127.0.0.1:%s/v1/status" % CONF["port"], timeout=3) as resp:
@@ -405,6 +452,7 @@ def main():
         return 0
     print("未知命令: %s（跑 `fairy_extend.py --help` 看用法）" % c)
     return 2
+
 
 if __name__ == "__main__":
     sys.exit(main())

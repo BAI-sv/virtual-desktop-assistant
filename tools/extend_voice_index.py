@@ -1,4 +1,25 @@
 # -*- coding: utf-8 -*-
+"""
+extend_voice_index.py —— 把【没被索引】的游戏音频补进语料库
+
+【为什么做】
+  D:\\FAIRY\\voice\\voices 里有 1601 个音频，但 voice_index.json 只索引了 1192 条
+  —— 有 409 个游戏原声没进语料库，等于白白浪费。
+
+【做什么】
+  用本地 faster-whisper(small) 把缺的那些转写成中文，追加进索引：
+      {"t": 去标点的文本, "r": 原文本, "w": 文件名, "y": "extra", "d": 时长}
+  之后"原声直出"的可命中句子从 1192 → 1601（+34%）。
+
+【安全】
+  - 先备份原索引到 voice_index.backup.json（只备一次，不覆盖已有备份）
+  - 写入用临时文件 + 原子替换，中途断电不会毁掉原索引
+  - 已索引的文件不会重复处理（按 w 字段判重）
+
+【用法】
+  py -3.12 extend_voice_index.py           补索引（后台跑）
+  py -3.12 extend_voice_index.py --dry     只看有多少要补，不写
+"""
 import json
 import os
 import shutil
@@ -12,11 +33,13 @@ VOICES = fairy_root.VOICES
 BACKUP = os.path.join(fairy_root.VOICE, "voice_index.backup.json")
 MODEL_DIR = fairy_root.WHISPER_MODELS
 
-
+# 之前实测有效的简化中文提示（不加它 Whisper 会输出繁体）
 PROMPT = "以下是普通话的句子，请用简体中文转写。"
+
 
 def log(s):
     print(s, flush=True)
+
 
 def wav_duration(p):
     try:
@@ -25,7 +48,15 @@ def wav_duration(p):
     except Exception:
         return 0.0
 
+
 def load_audio_16k(path):
+    """读 wav -> float32 单声道 16k numpy 数组。
+
+    【为什么要这么绕】faster-whisper 传**文件路径**时会走 soundfile，
+    实测报 `open() got an unexpected keyword argument 'metadata_errors'`
+    （soundfile 版本不兼容）→ 直接喂 numpy 数组绕开它。
+    这个坑我记账过（见环境约束的记账），写新脚本时漏了，现在补上。
+    """
     import numpy as np
     with wave.open(path, "rb") as w:
         nch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
@@ -45,9 +76,12 @@ def load_audio_16k(path):
         a = np.interp(idx, np.arange(len(a)), a).astype(np.float32)
     return np.ascontiguousarray(a, dtype=np.float32)
 
+
 def norm(s):
+    """去标点空白，作为触发键（和原索引的 t 字段风格一致）。"""
     PUNCT = set("…。，！？、；：“”‘’《》【】()[]{}<>!?,.;:\"'　 \t\n——%·")
     return "".join(ch for ch in str(s or "") if ch not in PUNCT).strip()
+
 
 def main():
     dry = "--dry" in sys.argv
@@ -70,7 +104,7 @@ def main():
         log("--dry：只报告，不写。")
         return 0
 
-
+    # 备份（只备一次）
     if not os.path.exists(BACKUP):
         shutil.copy2(INDEX, BACKUP)
         log("已备份原索引 -> %s" % BACKUP)
@@ -95,7 +129,7 @@ def main():
     for i, f in enumerate(todo, 1):
         p = os.path.join(VOICES, f)
         try:
-            audio = load_audio_16k(p)
+            audio = load_audio_16k(p)          # 传数组，不传路径（绕开 soundfile 版本坑）
             it, _info = model.transcribe(audio, language="zh", beam_size=1,
                                          initial_prompt=PROMPT, vad_filter=False)
             text = "".join(s.text for s in it).strip()
@@ -126,6 +160,7 @@ def main():
     log("完成：新增 %d 条（失败 %d）→ 索引共 %d 条" % (added, failed, len(lines)))
     log("索引已写回 %s" % INDEX)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

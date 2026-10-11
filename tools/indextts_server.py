@@ -1,4 +1,26 @@
 # -*- coding: utf-8 -*-
+"""
+IndexTTS 常驻合成服务（跑在 IndexTTS 自己的 venv 里）。
+
+为什么是独立进程 + HTTP：
+  1. IndexTTS 装在自己的 venv（Python 3.10/3.12），虚拟桌面助手 主程序在 Python 3.12，
+     两者不能互相 import；
+  2. 模型很大（IndexTTS-2 约 5.5GB），必须加载一次后常驻，不能每次合成都重载；
+  3. 这样"Fairy 本体音色"和"自定义音色"只是换一个 ref_audio 参数。
+
+自动适配两套安装：
+  * 【首选】D:\\NAI-xiao\\apps\\Index-TTS  —— 官方 IndexTTS 2.5 + ROCm GPU torch
+  * 【备选】D:\\Index-tts-2.0-Windows-AMD —— 老整合包，CPU
+
+关键环境：ROCm 是以 pip 包形式装在 venv 里的（不在 System32），
+要照 NAI-xiao 的 config\\amd.bat 用 `rocm-sdk` 取出路径并设 ROCM_PATH/HIP_PATH，
+且必须在 import torch 之前完成。
+
+接口：
+  GET  /health                      -> {"ok":true,"device":..,"api":..,"loaded":..}
+  POST /tts  {"text":..,"ref_audio":..,"lang":"zh","emo_alpha":1.0}
+                                    -> audio/wav 二进制
+"""
 import json
 import os
 import subprocess
@@ -10,24 +32,27 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import fairy_root
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）
 CREATE_NO_WINDOW = fairy_root.CREATE_NO_WINDOW
 
 PORT = int(os.environ.get("INDEXTTS_PORT", "9881"))
 ROOT = os.environ.get("INDEXTTS_ROOT") or fairy_root.INDEXTTS_ROOT
 
+
 def log(s):
     print("[IndexTTS %s] %s" % (time.strftime("%H:%M:%S"), s), flush=True)
 
+
 def setup_rocm_env():
+    """按 NAI-xiao 的 amd.bat 配置 ROCm SDK 路径。必须在 import torch 之前调用。"""
     scripts = os.path.dirname(sys.executable)
     sdk = os.path.join(scripts, "rocm-sdk.exe")
     if not os.path.exists(sdk):
         log("未发现 rocm-sdk.exe（这套环境可能不是 ROCm 构建）")
         return None
     try:
-
-
+        # ★ 2026-10-10【黑窗】rocm-sdk.exe 是控制台程序；本服务由 pythonw 起
+        #   （无控制台）-> 不加这个会弹一个终端窗口出来。
         subprocess.run([sdk, "init"], capture_output=True, timeout=300,
                        creationflags=CREATE_NO_WINDOW)
         r = subprocess.run([sdk, "path", "--root"], capture_output=True, text=True,
@@ -44,14 +69,19 @@ def setup_rocm_env():
                 [scripts, os.path.join(os.path.dirname(scripts), "Library", "bin"),
                  os.environ.get("PATH", "")])
 
-
+            # ---- 以下照抄整合包 .xiaoziya\config\amd.bat（gfx1201 能跑起来的关键）----
+            # 不设 MIOPEN_SYSTEM_DB_PATH，MIOpen 找不到预编译内核库，会退化成【现场 JIT 编译】，
+            # 实测报：`MIOpen Error [Compile] HIPRTC_ERROR_COMPILATION`
+            #         `fatal error: 'type_traits' file not found ... for gfx1201`
+            # 接着 GPT 前向就是 `torch.AcceleratorError: CUDA error: invalid argument`。
+            # amd.bat 里对非 gfx1100 的卡都会设这三个路径（本机 gfx1201 正需要）。
             devel = os.path.join(os.path.dirname(scripts), "Lib", "site-packages", "_rocm_sdk_devel")
             if os.path.isdir(devel):
                 binp = os.path.join(devel, "bin")
                 os.environ["MIOPEN_SYSTEM_DB_PATH"] = binp
                 os.environ["ROCBLAS_TENSILE_DB_PATH"] = os.path.join(binp, "rocblas")
                 os.environ["ROCBLAS_TENSILE_LIBPATH"] = os.path.join(binp, "rocblas", "library")
-
+            # 诊断用：设 VDA_DEBUG_HIP=1 才开（内核同步执行会让报错指到真正出错的算子）
             if os.environ.get("VDA_DEBUG_HIP"):
                 os.environ["HIP_LAUNCH_BLOCKING"] = "1"
                 os.environ["AMD_SERIALIZE_KERNEL"] = "3"
@@ -78,7 +108,16 @@ def setup_rocm_env():
         log("配置 ROCm 环境失败: %s" % e)
     return None
 
+
 def patch_sdpa_backends():
+    """SDPA 只留 math 后端（照 amd.bat 对旧卡的处理）。
+
+    实测（gfx1201 + ROCm 7.15.0a20260711）：
+      IndexTTS 2.5 的 GPT-2 注意力走 Flash / MemEff 路径时，在 beam search 里
+      报 `CUDA error: invalid argument`（异步冒泡到 attn_output + residual）。
+      关掉这两个、只留 math 后，同一次推理直接成功（实测 45.9 秒出一段 wav）。
+    amd.bat 里旧卡（RDNA1/2）用的正是这组开关，这里对 RDNA4 也得开。
+    """
     import torch
     for name, val in (("enable_flash_sdp", False),
                       ("enable_mem_efficient_sdp", False),
@@ -98,9 +137,23 @@ def patch_sdpa_backends():
     except Exception:
         pass
 
+
 def patch_miopen_batchnorm():
+    """绕开 gfx1201 上 MIOpen 的 spatial BatchNorm 内核（必须在推理前打）。
+
+    实测（RX 9070 XT / gfx1201 / ROCm 7.15.0a20260711）：
+      * SDK 的 bin 里只有 gfx908/gfx90a/gfx942/gfx950 的 MIOpen 内核库，
+        **没有 gfx1201 的**（只有 MIOpenCKGroupedConv_gfx1201.dll），
+        于是 MIOpen 退化成现场 JIT 编译；
+      * hiprtc 缺 C++ 标准头 -> `fatal error: 'type_traits' file not found`
+        -> `miopenStatusUnknownError` / 后续 `CUDA error: invalid argument`；
+      * `torch.backends.miopen.enabled = False` 对这个 BN 路径【无效】（实测）。
+    正解记录：装 MSVC 或补 libc++ 头都能修，但都太重。
+    eval 模式下 BN 本来就是个仿射变换，改用逐元素+广播算，完全绕开 MIOpen 内核。
+    实测与 CPU 参考的最大误差 = 0.000e+00（逐位一致）。
+    """
     try:
-        import torch
+        import torch                      # 必须在这里 import：下面 forward 闭包要用
         from torch.nn.modules.batchnorm import _BatchNorm
         if getattr(_BatchNorm, "_vda_patched", False):
             return
@@ -122,13 +175,16 @@ def patch_miopen_batchnorm():
     except Exception as e:
         log("BatchNorm 补丁失败（不致命）: %s" % e)
 
+
 def patch_torch():
+    """给 torch<2.3 补 get/set_default_device（新 transformers 会调用）。"""
     import torch
     if not hasattr(torch, "get_default_device"):
         torch.get_default_device = lambda: torch.device("cpu")
     if not hasattr(torch, "set_default_device"):
         torch.set_default_device = lambda device: None
     return torch
+
 
 class Engine:
     def __init__(self):
@@ -143,7 +199,7 @@ class Engine:
         if ROOT not in sys.path:
             sys.path.insert(0, ROOT)
         os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-
+        # 不要把 HF_HUB_OFFLINE 设成 1：会让 head 请求先跑然后不回退缓存
         for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
             os.environ.pop(k, None)
         torch = patch_torch()
@@ -173,8 +229,8 @@ class Engine:
             kw.update(use_bf16=want.startswith("cuda"), use_qwen_emo=False)
         else:
             kw.update(use_fp16=want.startswith("cuda"))
-
-
+        # 两套版本的构造参数不同（2.5 是 use_bf16，2.0 是 use_fp16），
+        # 直接按真实签名过滤，免得再踩字符串比较的坑。
         try:
             import inspect
             allowed = set(inspect.signature(mod.IndexTTS2.__init__).parameters)
@@ -188,12 +244,17 @@ class Engine:
         self.device = getattr(self.tts, "device", want)
         log("加载完成，耗时 %.0f 秒（实际 device=%s）" % (time.time() - t0, self.device))
 
-
+    # infer() 收 **generation_kwargs，但不是所有键都安全：
+    # 这里只透传确认被 infer_v2_5.py 消费的那批（见它里面的 pop 列表）。
     GEN_KEYS = ("do_sample", "top_p", "top_k", "temperature", "length_penalty",
                 "num_beams", "repetition_penalty", "max_mel_tokens",
                 "max_text_tokens_per_segment")
-
-
+    # ⚠️ 类型必须规整：transformers 的 RepetitionPenaltyLogitsProcessor 要求
+    # repetition_penalty 是 **float** 类型（不是"数值上为正"就行）：
+    #     if not isinstance(penalty, float) or not (penalty > 0): raise ValueError
+    # 而插件的 JS 默认值是 10.0，JSON 序列化后变成整数 10 → 报
+    #     `penalty` has to be a strictly positive float, but is 10
+    # 同理 num_beams/top_k 必须是 int，否则 HF 的 generate 也会炸。
     GEN_TYPES = {"do_sample": bool, "top_p": float, "top_k": int,
                  "temperature": float, "length_penalty": float, "num_beams": int,
                  "repetition_penalty": float, "max_mel_tokens": int,
@@ -225,7 +286,7 @@ class Engine:
         try:
             kw = dict(spk_audio_prompt=ref_audio, text=text, output_path=out, verbose=False)
             if self.is_v25:
-                kw["lang"] = lang
+                kw["lang"] = lang              # 2.5 的 lang 是位置必填参数
                 kw["emo_alpha"] = emo_alpha
             else:
                 kw["emo_alpha"] = emo_alpha
@@ -239,12 +300,17 @@ class Engine:
                     dropped.append(k)
             if dropped:
                 log("忽略不支持的参数：%s" % ", ".join(sorted(dropped)))
-
-
+            # ---- 关于 num_beams：默认不要动它 ----
+            # 不要把 num_beams 收到 1（曾有"快 7.1 倍"的说法，不成立）：
+            # 那个对比把冷启动（~23s 的 JIT/显存预热）与 num_beams 混在了一起。
+            # 干净对拍（先预热、交替测量、取热态均值）：
+            #     num_beams=1 -> 3.1s    num_beams=3 -> 3.6s    倍率只有 1.15x
+            # 而输出会变（音频 2.35s vs 2.64s）。为 15% 去改调用方的意图不值得，
+            # 所以原样透传；真想限制再设 INDEX_MAX_BEAMS（默认 0 = 不限制）。
             if MAX_BEAMS and isinstance(kw.get("num_beams"), int) and kw["num_beams"] > MAX_BEAMS:
                 log("num_beams %d -> %d（INDEX_MAX_BEAMS 限制）" % (kw["num_beams"], MAX_BEAMS))
                 kw["num_beams"] = MAX_BEAMS
-            with self.lock:
+            with self.lock:                    # 模型非线程安全，串行化
                 t0 = time.time()
                 self.tts.infer(**kw)
                 log("合成 %.1fs（num_beams=%s, max_mel=%s）：「%s」"
@@ -258,17 +324,39 @@ class Engine:
             except OSError:
                 pass
 
+
 ENGINE = Engine()
 
 
+# ---------------------------------------------------------------------------
+# dsh-plugin-tts 的 Index-TTS2 兼容层
+# ---------------------------------------------------------------------------
+# 插件 @memef1f1y/dsh-plugin-tts 期望的「官方 index-tts2 服务」形状，
+# 是从它自己的 lib/index.mjs + lib/client.js 里挖出来的：
+#   GET  /health
+#   GET  /api/v1/voices    -> {"voices": ["a.wav", ...]}   ← 纯字符串数组
+#                              （前端直接 v 当 key/value/label 用）
+#   POST /api/v1/tts/tasks  {text, prompt_audio, clean_text, emo_control_method,
+#                            emo_ref_path, emo_weight, emo_text, emo_random,
+#                            max_text_tokens_per_segment, do_sample, top_p, top_k,
+#                            temperature, length_penalty, num_beams,
+#                            repetition_penalty, max_mel_tokens}
+#                           -> 裸 wav 字节（插件只检查长度 > 1000）
+#   POST /api/v1/upload    multipart，字段名 file -> JSON
+# 它默认连 http://127.0.0.1:7880；把插件设置里的「服务地址」改成
+# http://127.0.0.1:9881 就能用上这套 GPU 克隆。
+#
+# 注意：这个整合包 **没有** 官方 api 服务（没有 FastAPI/uvicorn/Flask），
+# 插件文档里的「启动api服务.bat」属于另一个 bundle（index-tts2-nvidia）。
 FAIRY_DIR = fairy_root.ROOT
-VOICE_DIR = os.path.join(FAIRY_DIR, "voice", "index_voices")
-CORPUS_DIR = os.path.join(FAIRY_DIR, "voice", "voices")
-PROFILE_DIR = os.path.join(FAIRY_DIR, "voice", "profiles")
+VOICE_DIR = os.path.join(FAIRY_DIR, "voice", "index_voices")   # 插件面板里看到的参考音色
+CORPUS_DIR = os.path.join(FAIRY_DIR, "voice", "voices")        # 1192 条游戏原声
+PROFILE_DIR = os.path.join(FAIRY_DIR, "voice", "profiles")     # 自定义音色
 AUDIO_EXT = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
-
-
+# num_beams 上限：默认 0 = 不限制。收到 1 收益极小（干净对拍只有 1.15x），
+# 不值得为此改变输出；"快 7.1 倍"那种说法是把冷启动混进去了。
 MAX_BEAMS = int(os.environ.get("INDEX_MAX_BEAMS", "0") or 0)
+
 
 def _list_voices():
     try:
@@ -276,7 +364,9 @@ def _list_voices():
     except OSError:
         return []
 
+
 def _pick_fairy_ref():
+    """从句料库里挑一条时长接近 6 秒的当参考音频（长的参考克隆更稳）。"""
     import wave
     best, bestd = "", 9e9
     try:
@@ -294,7 +384,9 @@ def _pick_fairy_ref():
             best, bestd = p, abs(d - 6.0)
     return best
 
+
 def _seed_voice_dir():
+    """参考音色目录空的话，放两个现成的进去，免得插件面板里没东西可选。"""
     os.makedirs(VOICE_DIR, exist_ok=True)
     if _list_voices():
         return
@@ -313,7 +405,12 @@ def _seed_voice_dir():
         except Exception as e:
             log("放参考音色 %s 失败: %s" % (name, e))
 
+
 def _resolve_prompt(name):
+    """把插件给的 prompt_audio 解析成真实文件路径。
+
+    支持三种写法：绝对路径 / VOICE_DIR 下的文件名 / 语料库里的文件名。
+    """
     if not name:
         return ""
     name = str(name)
@@ -327,7 +424,9 @@ def _resolve_prompt(name):
     vs = _list_voices()
     return os.path.join(VOICE_DIR, vs[0]) if vs else ""
 
+
 def _extract_multipart_file(body, ctype):
+    """从 multipart 里抓出 name="file" 那一段（不引第三方库）。"""
     import re as _re
     m = _re.search(r'boundary=([^;]+)', ctype or "")
     if not m:
@@ -347,6 +446,7 @@ def _extract_multipart_file(body, ctype):
             data = data[:-2].rstrip(b"\r\n")
         return fname, data
     return None, None
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -370,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "voices": len(_list_voices())}).encode())
         elif p.startswith("/api/v1/voices"):
             vs = _list_voices()
-
+            # 插件前端把数组元素直接当 key/value/label 用 → 必须是字符串数组
             self._send(200, json.dumps({"voices": vs, "count": len(vs)}).encode())
         else:
             self._send(404, b'{"error":"not found"}')
@@ -403,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
 
             if p.startswith("/api/v1/tts/tasks"):
-
+                # ---- dsh-plugin-tts 的契约（snake_case 字段，回裸 wav）----
                 text = (req.get("text") or "").strip()
                 if not text:
                     self._send(400, b'{"detail":"text is required"}')
@@ -431,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if p.startswith("/tts"):
-
+                # ---- 虚拟桌面助手自用那套 ----
                 text = (req.get("text") or "").strip()
                 if not text:
                     self._send(400, b'{"error":"text is required"}')
@@ -446,7 +546,14 @@ class Handler(BaseHTTPRequestHandler):
             log("合成失败: %s\n%s" % (e, traceback.format_exc()[-700:]))
             self._send(500, json.dumps({"error": str(e)}).encode())
 
+
 def prewarm():
+    """启动后先跑一次短合成，把 ~23s 的 JIT/显存分配预热掉。
+
+    实测：冷启动第一次合成约 23~25s（含 HIP 内核 JIT、显存分配），
+    热态只要约 1.3x 音频时长（2.4s 音频 -> 3.1s）。若不在启动时预热，
+    用户第一次点朗读就要等二十多秒。文档里那个"38 秒"就是这么来的。
+    """
     try:
         vs = _list_voices()
         if not vs:
@@ -459,17 +566,20 @@ def prewarm():
     except Exception as e:
         log("预热失败（不影响使用）: %s" % e)
 
+
 def main():
     ENGINE.load()
     _seed_voice_dir()
-
-
+    # 预热放后台线程：先让 /health 和接口可用，再慢慢把 JIT/显存预热掉。
+    # 否则启动后 40 秒内 health 都不通，插件会直接报"无法连接"。
+    # ENGINE.synth 里有锁，预热与真实请求不会撞车（只会排队）。
     threading.Thread(target=prewarm, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     log("服务就绪: http://127.0.0.1:%d  (api=%s device=%s)" % (PORT, ENGINE.api, ENGINE.device))
     log("  参考音色目录: %s（%d 个）" % (VOICE_DIR, len(_list_voices())))
     log("  兼容 dsh-plugin-tts：GET /api/v1/voices  POST /api/v1/tts/tasks  POST /api/v1/upload")
     srv.serve_forever()
+
 
 if __name__ == "__main__":
     main()

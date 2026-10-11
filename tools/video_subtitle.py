@@ -1,4 +1,45 @@
 # -*- coding: utf-8 -*-
+"""
+video_subtitle.py —— 看视频时【实时转写字幕 + 翻译中文 + 记录要点】
+
+【用户需求】"我看视频的时候你要帮我翻译视频内的对话和记录要点等等"
+
+====================== 实测数据（2026-10-08，本机，非估算） ======================
+ASR   whisper-small / CPU / int8 / beam_size=1
+      22.6s 音频 -> 9.9s 处理 = 平均 2.29x 实时   ✅ 够实时
+      单块参考：2.00s 音频 -> 1.47s
+      ⚠ 关键坑：**没有人声时反而更慢**！Whisper 听不到语音会反复解码瞎猜——
+        实测 8 秒纯音乐花了 45.2s（0.18x）。所以必须先用能量门限跳过静音/纯音乐段。
+翻译  本机 Ollama qwen3:30b-a3b：冷启 6.55s，热态 1.25~1.40s/句   ✅
+采集  「立体声混音 (Realtek)」：**必须用它自己的默认采样率**
+      （本机 PortAudio idx1=44100 / idx18=192000；传错报 PortAudioError -9997）
+      ✅ 实测能抓到正在播放的系统声音（RMS 0.13~0.19）
+
+====================== 为什么自己写（上网评估过现成方案） ======================
+· EchoSub (lanceden/EchoSub)：Roadmap 里"即時語音擷取(Streaming)"**未完成**，
+  实际只有 VTT->双语 SRT 的事后转换；依赖 torch。→ 不做实时，**不可复用**。
+· LiveCaption_Global (begin0808)：**MIT 许可，做得很棒**，但采集走 Chrome 扩展
+  `tabCapture`，**只能抓浏览器分页**；本机要"看视频"含本地播放器 → **整体不复用**。
+  ⚠ 值得记的技术选型：它用 **SenseVoice-Small + Sherpa-ONNX + Silero VAD** 做 CJK 高速识别。
+  **但我实测 whisper-small 已达 2.29x 实时，本次不需要它**；将来要更低延迟再说
+  （需装 sherpa-onnx + 下模型，两项都要用户同意）。
+
+====================== 设计决策 ======================
+1. 采集用「立体声混音」——**能抓任意应用的声音**（不限浏览器），比 tabCapture 通用
+2. **VAD-lite 句级断句**：靠能量找"说话停顿"切句（静音≥0.45s 或满 12s 强制切）。
+   固定 2 秒硬切会把词切碎，whisper 对半截词很容易猜错。→ 这是质量关键
+3. 静音/纯音乐段**直接跳过**（既省时间，又避免 whisper 瞎猜）
+4. 翻译走**本机 Ollama**（离线、不上传、隐私）
+5. 字幕用**独立浮窗**（**不动 fairy_ball.py**，避免与别的代理撞车）
+6. 只留文字不留音频；手动开关，不常驻
+
+====================== 用法 ======================
+  py -3.12 video_subtitle.py --list        列出采集设备 + 后端可用性
+  py -3.12 video_subtitle.py --selftest    自检：采集 / 转写 / 翻译 / 落盘（不用真看视频）
+  py -3.12 video_subtitle.py --run         正式跑（Ctrl+C 停，结束时自动出要点）
+  py -3.12 video_subtitle.py --run --translate --subtitle
+  py -3.12 video_subtitle.py --run --src 18 --chunk 1.0 --minutes 30
+"""
 import argparse
 import json
 import os
@@ -23,10 +64,12 @@ GAP_NEED = 0.45
 MAX_SENT = 12.0
 STEP = 1.0
 
+
 def log(s):
     print(s, flush=True)
 
 
+# ============================================================ 采集后端（可插拔）
 class AudioSource:
     name = "base"
 
@@ -39,7 +82,12 @@ class AudioSource:
     def read(self, seconds):
         raise NotImplementedError
 
+
 class StereoMixSource(AudioSource):
+    """立体声混音 —— Realtek 声卡上现成的输入设备（能抓系统输出）。
+
+    ⚠ 局限：只抓 **Realtek 的输出**。音频若走蓝牙音箱/HDMI 可能抓不到（那是别的端点）。
+    """
     name = "stereo_mix"
 
     def __init__(self, force_idx=None):
@@ -81,7 +129,13 @@ class StereoMixSource(AudioSource):
             rec = rec.mean(axis=1)
         return np.ascontiguousarray(rec, dtype=np.float32), self.sr
 
+
 class WasapiLoopbackSource(AudioSource):
+    """WASAPI loopback —— 能抓【任意输出端点】（含蓝牙/HDMI）。
+
+    需要 `pyaudiowpatch`（**本机未装；按用户要求不擅自装**）。
+    装了会自动可用，主流程不用改。
+    """
     name = "wasapi_loopback"
 
     def __init__(self):
@@ -128,7 +182,9 @@ class WasapiLoopbackSource(AudioSource):
             a = a.reshape(-1, self.ch).mean(axis=1)
         return np.ascontiguousarray(a, dtype=np.float32), self.sr
 
+
 def pick_source(src_idx=None):
+    """挑采集源：指定索引优先；否则 loopback（能抓蓝牙）> 立体声混音。"""
     if src_idx is not None:
         return StereoMixSource(force_idx=int(src_idx))
     lb = WasapiLoopbackSource()
@@ -137,6 +193,7 @@ def pick_source(src_idx=None):
     return StereoMixSource()
 
 
+# ============================================================ 重采样 / 转写
 def to_16k_mono(a, sr):
     if sr == TARGET_SR:
         return a
@@ -151,12 +208,15 @@ def to_16k_mono(a, sr):
         return np.ascontiguousarray(np.interp(np.linspace(0, len(a) - 1, n),
                                               np.arange(len(a)), a).astype(np.float32))
 
+
 _MODEL = None
 _MODEL_SIZE = "small"
 _MODEL_LOCK = threading.Lock()
 
+
 def _zh_only(s):
     return "".join(ch for ch in str(s or "") if "\u4e00" <= ch <= "\u9fff")
+
 
 def get_model():
     global _MODEL
@@ -168,8 +228,10 @@ def get_model():
             _MODEL = WhisperModel(_MODEL_SIZE, device="cpu", compute_type="int8",
                                   download_root=MODEL_DIR)
             log("[模型] 就绪 %.1fs" % (time.time() - t0))
-
-
+            # ★ 预热：实测【第一次推理可能病态地慢】——本机自检里第 1 句 5.34s 音频花了
+            #   45.48s（0.12x），而第 2/3 句只要 1.68s/1.93s（1.1~2.0x）。
+            #   所以加载后立刻喂 1 秒静音跑一次，把慢的那次消化在启动阶段，
+            #   否则用户看视频的第一句字幕会等 45 秒。
             try:
                 _t = time.time()
                 list(_MODEL.transcribe(np.zeros(TARGET_SR, dtype=np.float32),
@@ -180,7 +242,15 @@ def get_model():
                 log("[模型] 预热失败（不影响使用）: %s" % _e)
     return _MODEL
 
+
 def transcribe(a16):
+    """a16: float32 单声道 16k 数组 -> 文本。**必须传数组，不能传文件路径**。
+
+    坑1：faster-whisper 传路径会走 soundfile，报
+         `open() got an unexpected keyword argument 'metadata_errors'`
+    坑2：**听不到人话时 Whisper 会把 initial_prompt 原样吐回来**
+         （实测输出"请用简体中文转写。"）—— 必须过滤，否则字幕反复刷这句。
+    """
     if a16 is None or len(a16) < TARGET_SR // 4:
         return ""
     m = get_model()
@@ -189,13 +259,15 @@ def transcribe(a16):
     txt = "".join(s.text for s in it).strip()
     a, b = _zh_only(txt), _zh_only(PROMPT)
     if not a or a in b or b.endswith(a):
-        return ""
+        return ""          # 判定为提示词回声
     if len(a) <= 1:
-        return ""
+        return ""          # 单字多为噪声
     return txt
 
 
+# ============================================================ 翻译 / 摘要
 _OLLAMA_MODEL = ""
+
 
 def _pick_ollama():
     global _OLLAMA_MODEL
@@ -217,13 +289,14 @@ def _pick_ollama():
         pass
     return ""
 
+
 def ollama(prompt, timeout=120):
     m = _pick_ollama()
     if not m:
         return None
     try:
         import urllib.request
-
+        # ★ keep_alive：不让模型被 5 分钟卸载（冷启动 6.8s → 热态 1.0s）
         body = json.dumps({"model": m, "prompt": prompt, "stream": False,
                            "keep_alive": "2h",
                            "options": {"temperature": 0.2}}).encode("utf-8")
@@ -234,11 +307,13 @@ def ollama(prompt, timeout=120):
     except Exception:
         return None
 
+
 def translate(text):
     if not text:
         return ""
     r = ollama("把下面这句字幕翻译成简体中文，只输出译文，不要解释、不要拼音：\n" + text, timeout=90)
     return r or ""
+
 
 def summarize(lines):
     if not lines:
@@ -251,6 +326,7 @@ def summarize(lines):
     return [r] if r else []
 
 
+# ============================================================ 字幕浮窗（独立，不动球）
 class SubtitleWindow:
     def __init__(self, y=1120):
         self.root = self.lbl = None
@@ -297,7 +373,9 @@ class SubtitleWindow:
             pass
 
 
+# ============================================================ 核心：处理一句
 def emit(seg, sr, idx, lines, fh, do_tr, win):
+    """把累积的一段音频转写（+翻译）并落盘。"""
     dur = len(seg) / float(sr or 1)
     a16 = to_16k_mono(seg, sr)
     t0 = time.time()
@@ -328,6 +406,7 @@ def emit(seg, sr, idx, lines, fh, do_tr, win):
         win.show(raw + (("\n" + tr) if tr else ""))
 
 
+# ============================================================ 主循环
 def run(step=STEP, do_tr=False, subtitle=False, src_idx=None, max_minutes=0, out=None):
     src = pick_source(src_idx)
     if not src.available():
@@ -399,6 +478,7 @@ def run(step=STEP, do_tr=False, subtitle=False, src_idx=None, max_minutes=0, out
     return 0
 
 
+# ============================================================ 自检
 def load_wav_16k(p):
     with wave.open(p, "rb") as w:
         nch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
@@ -417,6 +497,7 @@ def load_wav_16k(p):
         a = np.interp(np.linspace(0, len(a) - 1, int(len(a) * 16000.0 / sr)),
                       np.arange(len(a)), a).astype(np.float32)
     return np.ascontiguousarray(a, dtype=np.float32)
+
 
 def selftest():
     import glob
@@ -507,6 +588,7 @@ def selftest():
     log("=" * 66)
     return 0 if state["fail"] == 0 else 1
 
+
 def cmd_list():
     import sounddevice as sd
     print("=== 输入设备（可采集）===")
@@ -529,6 +611,7 @@ def cmd_list():
     m = _pick_ollama()
     print("  Ollama: %s" % (("可用，模型 " + m) if m else "不可用（服务没起或缺模型）"))
     return 0
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -553,6 +636,7 @@ def main():
         return run(a.chunk, a.translate, a.subtitle, a.src, a.minutes, a.out)
     ap.print_help()
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

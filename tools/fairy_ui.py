@@ -1,4 +1,28 @@
+#!/usr/bin/env python3
+"""fairy_ui.py — 给 Strata 用的中文前端 + 反向代理
 
+【为什么需要它】
+  Strata 自带 web UI（端口 8080），但：
+    · 界面是英文
+    · 没有「直答 / 该想」的档位概念
+    · 不显示实际用了什么档、思考预算、耗时
+  Strata 的 server.py 只硬编码伺服 index.html / monitor.html 两个文件
+  （见 server.py:4525），往它的 web 目录塞新 html 会被 404 ✗
+  而且它的 CORS 默认关闭（cors_origins = []），别处的页面调不了它 ✗
+
+  → 所以本工具做两件事：
+     ① 在本地端口上伺服我们自己的中文界面
+     ② 把 /v1/* 和 /api/* 请求【流式转发】给 Strata
+  → 页面与服务同源 → 零 CORS 配置、不动 Strata 一个字节 ✓
+
+【用法】
+  py -3.12 fairy_ui.py                  # 默认 8081，自动打开浏览器
+  py -3.12 fairy_ui.py --port 9000
+  py -3.12 fairy_ui.py --no-open
+  py -3.12 fairy_ui.py --upstream http://127.0.0.1:8080
+
+【访问】http://127.0.0.1:8081/
+"""
 
 import argparse
 import http.client
@@ -21,18 +45,31 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 UI_FILE = os.path.join(HERE, "strata_ui.html")
 DEFAULT_UPSTREAM = "http://127.0.0.1:8080"
 
-
+# ---------------------------------------------------------------------------
+# 语音：/stt 走本地 faster-whisper；/tts 先试 DSH 的 TTS，失败退回 IndexTTS
+#
+#   ★★ 三个实测过的坑（2026-10-10）：
+#     1. whisper 首次加载约 50~60 秒 -> 必须【常驻单例】+ 启动时后台预热
+#     2. faster-whisper 的 transcribe() 【不能传文件路径】！
+#        传路径会走 PyAV 解码，而本机 PyAV 不认 metadata_errors 参数 ->
+#        TypeError: open() got an unexpected keyword argument 'metadata_errors'
+#        -> 必须自己解码成 numpy float32 数组再传 ✓
+#     3. 浏览器 MediaRecorder 录的是 webm/opus，whisper 要 16kHz 单声道
+#        -> 用 imageio-ffmpeg 自带的静态 ffmpeg 解码（管道，不落盘）
+# ---------------------------------------------------------------------------
 STT_MODEL = None
 STT_LOCK = threading.Lock()
-WHISPER_MODELS = os.environ.get("WHISPER_MODELS", r"<FAIRY_ROOT>\models\whisper")
+WHISPER_MODELS = os.environ.get("WHISPER_MODELS", r"D:\FAIRY\models\whisper")
 
 DSH_API = os.environ.get("DSH_API", "http://127.0.0.1:19387")
 INDEXTTS_URL = os.environ.get("FAIRY_INDEXTTS_URL", "http://127.0.0.1:9881")
-REF_AUDIO = os.environ.get("FAIRY_REF_AUDIO", r"<FAIRY_ROOT>\voice\index_voices\fairy.wav")
+REF_AUDIO = os.environ.get("FAIRY_REF_AUDIO", r"D:\FAIRY\voice\index_voices\fairy.wav")
 
 _FFMPEG = None
 
+
 def ffmpeg_exe():
+    """imageio-ffmpeg 自带的静态 ffmpeg；找不到就退回 PATH 里的。"""
     global _FFMPEG
     if _FFMPEG:
         return _FFMPEG
@@ -43,7 +80,12 @@ def ffmpeg_exe():
         _FFMPEG = "ffmpeg"
     return _FFMPEG
 
+
 def decode_audio(data, timeout=120):
+    """任意音频字节（webm/opus/wav/mp3/m4a…）-> (numpy float32 16k 单声道, err)
+
+    ★ 走管道，不落临时文件。ffmpeg 从 stdin 读，往 stdout 吐 raw s16le。
+    """
     try:
         import numpy as np
     except Exception as e:
@@ -54,8 +96,9 @@ def decode_audio(data, timeout=120):
              "-i", "pipe:0", "-vn",
              "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
             input=data, capture_output=True, timeout=timeout,
-
-
+            # ★ 2026-10-10【黑窗】ffmpeg 是控制台程序。本进程若由 py.exe /
+            #   python.exe 以外的方式起（无控制台），不加这个每解码一次音频
+            #   就弹一个终端窗口。
             creationflags=0x08000000)
     except subprocess.TimeoutExpired:
         return None, "解码超时（音频太长？）"
@@ -69,7 +112,9 @@ def decode_audio(data, timeout=120):
         return None, "解码后是空的（没听到声音？）"
     return a, None
 
+
 def _load_whisper():
+    """加载 whisper —— 全局单例，用锁保证只加载一次。"""
     global STT_MODEL
     with STT_LOCK:
         if STT_MODEL is None:
@@ -77,6 +122,7 @@ def _load_whisper():
             STT_MODEL = WhisperModel("small", device="cpu", compute_type="int8",
                                      download_root=WHISPER_MODELS)
     return STT_MODEL
+
 
 def warm_whisper():
     try:
@@ -86,10 +132,12 @@ def warm_whisper():
     except Exception as e:
         print("  [stt] whisper 加载失败：%s: %s" % (type(e).__name__, e), flush=True)
 
+
 def do_stt(data):
+    """音频字节 -> 文字。返回 (ok, text_or_errmsg)。"""
     t0 = time.time()
     try:
-        m = _load_whisper()
+        m = _load_whisper()          # 首次会阻塞到加载完（约 60 秒）
     except Exception as e:
         return False, "whisper 加载失败: %s" % e
     load_s = time.time() - t0
@@ -112,7 +160,12 @@ def do_stt(data):
         return False, "转写失败: %s: %s" % (type(e).__name__, e)
 
 
+# ---------------- TTS：两条路 ----------------
 def tts_via_dsh(text, timeout=120):
+    """DSH 的 TTS 插件。POST /dsh-tts-api/speak {"text"} -> {"url"} -> GET 拿 mp3。
+
+    ★ 注意：它返回的是【一个 URL】，不是音频本身 —— 要再 GET 一次（实测）。
+    """
     body = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(DSH_API + "/dsh-tts-api/speak", data=body,
                                  headers={"Content-Type": "application/json"})
@@ -132,7 +185,9 @@ def tts_via_dsh(text, timeout=120):
         raise RuntimeError("dsh-tts 返回空音频")
     return data, ctype
 
+
 def tts_via_indextts(text, timeout=300):
+    """IndexTTS（GPU 克隆，慢）。POST /tts {"text","ref_audio"} -> WAV。"""
     payload = {"text": text}
     if os.path.exists(REF_AUDIO):
         payload["ref_audio"] = REF_AUDIO
@@ -146,9 +201,11 @@ def tts_via_indextts(text, timeout=300):
         raise RuntimeError("IndexTTS 返回空音频")
     return data, ctype
 
-def do_tts(text):
-    errs = []
 
+def do_tts(text):
+    """文字 -> (bytes, ctype)。先 DSH（快、不占 GPU），失败退回 IndexTTS。"""
+    errs = []
+    # ① DSH TTS
     try:
         t0 = time.time()
         data, ctype = tts_via_dsh(text)
@@ -157,7 +214,7 @@ def do_tts(text):
         return True, (data, ctype)
     except Exception as e:
         errs.append("DSH: %s: %s" % (type(e).__name__, str(e)[:120]))
-
+    # ② IndexTTS
     try:
         t0 = time.time()
         data, ctype = tts_via_indextts(text)
@@ -168,7 +225,9 @@ def do_tts(text):
         errs.append("IndexTTS: %s: %s" % (type(e).__name__, str(e)[:120]))
     return False, "TTS 两条路都不通 -> " + " | ".join(errs)
 
+
 def tts_available():
+    """启动时探一下哪条路通（只报告，不阻塞）。"""
     for name, fn in (("DSH", lambda: tts_via_dsh("测试")),
                      ("IndexTTS", lambda: tts_via_indextts("测试"))):
         try:
@@ -181,7 +240,24 @@ def tts_available():
             print("  [tts] %s 不可用：%s: %s" % (name, type(e).__name__, str(e)[:100]), flush=True)
 
 
+# ---------------------------------------------------------------------------
+# ★ 让桌面球念：POST /say  ->  转发到 DSH 插件的 /api/fairy/push
+#
+#   【为什么要这个端点】Strata 界面里的回答【不在 DSH 会话里】，
+#     所以球轮询的 GET /api/fairy/reply 取不到它 -> 球念不了 ✗
+#     插件那边新加了 push 端点：把文本塞进 REPLY 槽【并推进 seq】，
+#     球下一次轮询（约 900ms）就会念出来 ✓
+#
+#   【为什么要经过本代理】浏览器在 8081，DSH 在 19387 -- 跨源，
+#     前端直接 fetch 会被 CORS 挡掉。走同源代理最省事 ✓
+#
+#   ★ 前端契约（strata_ui.html 就是这么调的）：
+#       POST /say {"text":"...","source":"strata"}
+#       -> 200 {"ok":true,"seq":N,"text":"...","truncated":bool}
+#       -> 503 {"error":"..."}   比如 DSH 还没重启、插件里没有这个路由
+# ---------------------------------------------------------------------------
 def push_to_ball(text, source="strata", timeout=15):
+    """把一段文字推给桌面球去念。返回 (ok, dict 或 错误字符串)。"""
     url = DSH_API.rstrip("/") + "/api/fairy/push"
     payload = json.dumps({"text": text, "source": source},
                          ensure_ascii=False).encode("utf-8")
@@ -202,35 +278,44 @@ def push_to_ball(text, source="strata", timeout=15):
         except Exception:
             pass
         if e.code in (401, 404):
-
-
+            # ★ 实测（2026-10-10）：DSH 的 /api/* 命名空间下，
+            #   【没注册的路由一律返回 401 unauthorized】（不是 404）。
+            #   对照实验：GET/POST /api/fairy/nosuchroute -> 都是 401；
+            #             已注册的 /api/fairy/task POST -> 200。
+            #   所以这里的 401 含义就是「插件里还没有这个路由」= 需要重启 DSH。
+            # ★ 消息要短 —— 前端状态栏只显示前 90 字，关键信息必须放最前面。
             return False, "插件新路由还没加载，需要重启 DSH 才生效（重启会中断当前对话，请自己选时机）"
         return False, "DSH 返回 HTTP %d %s" % (e.code, body)
     except Exception as e:
         return False, "连不上 DSH（%s）：%s" % (url, e)
 
 
+# 这些前缀的请求转发给 Strata；其余当静态文件
+# ★ /metrics 是真正的遥测接口：live 实时速度 · hardware CPU/磁盘/内存 ·
+#   engine 专家缓存/PCIe 占比/显存 · history 60 点历史 · totals 累计
 PROXY_PREFIXES = ("/v1/", "/api/", "/status", "/health", "/props", "/slots",
                   "/models", "/metrics")
-
-
+# ★ 这些路径我们自己处理，不走代理（/stt /tts /say 是前端实际调的；带 /api 的也留着兼容）
+#   /say = 推给桌面球念（转发到 DSH 插件的 /api/fairy/push）
 LOCAL_POST = ("/stt", "/tts", "/say", "/api/stt", "/api/tts", "/api/say")
 
 UPSTREAM = DEFAULT_UPSTREAM
 
+
 def upstream_parts():
     u = urllib.parse.urlparse(UPSTREAM)
     return u.hostname or "127.0.0.1", u.port or 8080
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "FairyUI/1.0"
 
     def log_message(self, fmt, *args):
-
+        # 静音常规访问日志，只留错误
         pass
 
-
+    # ---------------- 代理 ----------------
     def _proxy(self, method):
         host, port = upstream_parts()
         body = None
@@ -260,14 +345,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_response(resp.status)
-
+        # 转发上游的响应头（跳过逐跳头和我们自己要重写的）
         skip = ("connection", "transfer-encoding", "content-length", "keep-alive")
         for k, v in resp.getheaders():
             if k.lower() in skip:
                 continue
             self.send_header(k, v)
-
-
+        # 不用 Content-Length：靠 Connection: close 界定 body，
+        # 这样流式（SSE）能一块一块立刻到达，不会被缓冲
         self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Accel-Buffering", "no")
@@ -285,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
-
+    # ---------------- 静态 ----------------
     def _static(self):
         if not os.path.exists(UI_FILE):
             self.send_response(500)
@@ -328,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
-
+        # ---- 本地端点：语音转写 / 语音合成（不走代理）----
         if p in LOCAL_POST:
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else b""
@@ -341,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(500, "application/json; charset=utf-8",
                                json.dumps({"error": out}, ensure_ascii=False).encode("utf-8"))
             elif p.endswith("say"):
-
+                # ---- ★ 推给桌面球念（球会用 Fairy 克隆音色念出来）----
                 try:
                     o = json.loads(body.decode("utf-8")) or {}
                 except Exception:
@@ -384,7 +469,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+
 def wait_upstream(host, port, secs=40):
+    """等上游起来（Strata 可能正在加载模型）。"""
     t0 = time.time()
     while time.time() - t0 < secs:
         s = socket.socket()
@@ -402,6 +489,7 @@ def wait_upstream(host, port, secs=40):
                 pass
         time.sleep(1)
     return False
+
 
 def main():
     global UPSTREAM
@@ -432,10 +520,10 @@ def main():
     print("  按 Ctrl+C 停止")
     print("=" * 62)
 
-
+    # ★ whisper 首次加载约 60 秒，后台预热（不阻塞服务启动）
     print("  [stt] 后台预热 whisper…（首次约 60 秒，期间语音输入按钮会慢）", flush=True)
     threading.Thread(target=warm_whisper, daemon=True, name="whisper-warm").start()
-
+    # ★ 顺便探一下 TTS 哪条路通（DSH 优先，退回 IndexTTS）
     threading.Thread(target=tts_available, daemon=True, name="tts-probe").start()
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -450,6 +538,7 @@ def main():
         print("\n  已停止")
     finally:
         srv.server_close()
+
 
 if __name__ == "__main__":
     main()

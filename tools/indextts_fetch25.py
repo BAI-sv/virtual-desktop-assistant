@@ -1,4 +1,18 @@
 # -*- coding: utf-8 -*-
+"""
+把 IndexTTS 2.5 的模型文件补齐（按文件尺寸自动比对，只拉不匹配的）。
+
+根因（实测）：NAI-xiao 整合包用 `indextts2 download` 拉的是 **IndexTeam/IndexTTS-2（2.0）**
+仓库，但仓库代码与 `infer_v2_5.py` 是 **2.5**。两者文件集与形状都不同：
+    2.0 的 gpt.pth: text_embedding = [12001, 1280]
+    2.5 的 config.yaml 要求:      = [60510, 1280]   （多语言词表）
+所以光补 codec.pth 不够，gpt.pth / s2mel.pth / qwen0.6bemo 等也要换成 2.5 版。
+
+策略：拉 2.5 仓库的文件清单（含尺寸），和本地逐个比；尺寸不符或缺失才下载。
+这样可断点续传、不会白下已经对的文件。
+
+用法： py -3.12 tools\\indextts_fetch25.py
+"""
 import json
 import os
 import sys
@@ -14,11 +28,13 @@ LOGDIR = fairy_root.LOGS
 LOG = os.path.join(LOGDIR, "its25_full.txt")
 KEEP_OLD = ("config.yaml.from_2.0_repo",)
 
+
 def log(s):
     print(s, flush=True)
     os.makedirs(LOGDIR, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(s + "\n")
+
 
 def list_repo():
     u = ("https://modelscope.cn/api/v1/models/%s/repo/files?" % REPO
@@ -36,6 +52,7 @@ def list_repo():
             continue
         out.append((path, size))
     return out
+
 
 def fetch(path, size):
     dst = os.path.join(CK, path.replace("/", os.sep))
@@ -59,6 +76,7 @@ def fetch(path, size):
                 log("     %-44s %6.1f/%.1f MB" % (path[-44:], got / 2 ** 20, size / 2 ** 20))
     os.replace(tmp, dst)
     log("   OK   %-46s %7.2f MB  %.0f 秒" % (path, os.path.getsize(dst) / 2 ** 20, time.time() - t0))
+
 
 def main():
     if os.path.exists(LOG):
@@ -95,6 +113,7 @@ def main():
                 path, size / 2 ** 20,
                 ("%.2f MB" % (os.path.getsize(dst) / 2 ** 20)) if os.path.exists(dst) else "缺失"))
     log("FETCH25_DONE 不符=%d" % bad)
+
 
 if __name__ == "__main__":
     main()

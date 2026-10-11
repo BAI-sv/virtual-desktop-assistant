@@ -182,10 +182,10 @@ button,input,textarea{font:inherit;color:inherit}
    · .bd 从 flex:1 改成「按内容收窄 + 上限 82%」，气泡才贴得住右边
    · 规则一律带 .msg.u 前缀 —— AI 那一侧（思考过程 / 元信息 / 操作条）完全不受影响 */
 .msg.u{flex-direction:row-reverse}
-/* ：去掉用户消息那侧的「问」标签（头像 + 角色名都不要）。
+/* ★ 2026-10-10 用户要求：去掉用户消息那侧的「问」标签（头像 + 角色名都不要）。
    理由：聊天软件里自己发的消息通常不带头像和名字，去掉更干净。
    ★ 想还原：把下面两条 display:none 删掉即可。 */
-/* 更正：用户要【保留蓝色头像】，只去掉灰色那行角色名。
+/* ★ 2026-10-10 更正：用户要【保留蓝色头像】，只去掉灰色那行角色名。
    （上一版把头像也藏了，用户纠正） */
 .msg.u .role{display:none}
 .msg.u .bd{max-width:82%}
@@ -368,6 +368,7 @@ table.req td.n{color:var(--fg);font-weight:600}
         <div class="crow">
           <button class="ib" id="attach" title="上传文本文件（图片不支持 —— 模型只收文本）"><svg class="ic"><use href="#i-clip"/></svg></button>
           <button class="ib" id="mic" title="按住说话（本地 whisper 转写）"><svg class="ic"><use href="#i-mic"/></svg></button>
+          <!-- ★ 2026-10-10：原「朗读最近一条」#speak 已删除 —— 朗读改为每条回答下方的操作条 -->
           <input type="file" id="file" multiple hidden
                  accept=".txt,.md,.json,.py,.js,.ts,.log,.csv,.yaml,.yml,.xml,.html,.css,.bat,.ps1,.sh,.ini,.toml,.sql,.java,.c,.cpp,.h,.go,.rs">
           <span class="hint2" id="recHint">Enter 发送 · Shift+Enter 换行<span id="stat"></span></span>
@@ -525,7 +526,7 @@ function notify(text){
   el.querySelector(".nt").textContent = text;
   clearTimeout(_noticeTimer);
   _noticeTimer = setTimeout(()=>{ const x = document.getElementById("notice"); if(x) x.remove(); }, 15000);
-  window.__lastNotice = text;
+  window.__lastNotice = text;      // 留个抓手，方便验证/排查
   return text;
 }
 
@@ -1100,7 +1101,7 @@ $("#mic").onclick = toggleRec;
 
 /* ==========================================================================
    语音朗读（调代理 → DSH 的 TTS → Fairy 音色）
-   改版：
+   ★ 2026-10-10 改版：
      · 朗读按钮从顶栏旁边/输入框那排，搬到【每条回答下方】的操作条里
      · 念哪条就传哪条的原文（存在 .bd 的 data-raw 上，不再用「最近一条」这种全局变量）
      · 同一时刻只允许一条在念；再点一下就是停
@@ -1129,7 +1130,7 @@ function paintSpk(btn, s, label){
 /* ==========================================================================
    ★ 朗读失败提示条（2026-10-10 加）
      【为什么】以前只有按钮变红 + 输入框旁边一行小字，用户不知道该怎么办。
-     实测（2026-10-10 13:5x）：球念 -> POST /say -> 503，代理返回是
+     实测（2026-10-10 13:5x）：球念 -> POST /say -> 503，代理原话是
      「插件新路由还没加载，需要重启 DSH 才生效」；DSH /api/fairy/push 直接 401。
      【怎么做】把原因和下一步直接贴在【出问题的那条回答】下面，并给一个
      「改用网页念」按钮 —— 不用等重启 DSH 也能马上听。

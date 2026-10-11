@@ -1,4 +1,25 @@
 # -*- coding: utf-8 -*-
+"""
+fairy_audio.py —— 默认音频输出设备的【读取 / 保存 / 还原】
+
+【为什么需要它】
+  2026-10-09 事故：fairy_ear.py（耳朵）用了蓝牙耳机的麦克风 →
+  Windows 自动把【默认输出设备】从扬声器切成了耳机（HFP 免提模式）→
+  耳朵停掉后【没有还原】→ 球说话的声音全跑进耳机，用户"一点声音都没有了"。
+  → 所以任何会用到蓝牙麦克风的程序，都必须在开始前 save()、结束后 restore()。
+
+【用法】
+  py -3.12 fairy_audio.py list          列出所有【激活中】的输出设备
+  py -3.12 fairy_audio.py current       打印当前默认输出
+  py -3.12 fairy_audio.py save          把当前默认输出存到 fairy_audio_state.json
+  py -3.12 fairy_audio.py restore       还原到保存的那台
+  py -3.12 fairy_audio.py set <名称片段> 切换默认输出到匹配的设备（三个角色都切）
+  py -3.12 fairy_audio.py guard-on      保存 + 注册 atexit（同一进程内自动还原）
+
+【原理】Core Audio 的 IPolicyConfig::SetDefaultEndpoint(vtable[13])。
+  必须只对【激活中】(DEVICE_STATE_ACTIVE=1) 的设备切换 —— 否则 Windows 会静默退回原设备
+  （2026-10-09 实测：切给未激活的蓝牙音箱无效，切给激活的设备立刻生效）。
+"""
 import atexit
 import ctypes
 import json
@@ -8,19 +29,24 @@ import fairy_root
 
 STATE = fairy_root.log("fairy_audio_state.json")
 
+
 class GUID(ctypes.Structure):
     _fields_ = [("D1", ctypes.c_ulong), ("D2", ctypes.c_ushort),
                 ("D3", ctypes.c_ushort), ("D4", ctypes.c_ubyte * 8)]
 
+
 class PROPERTYKEY(ctypes.Structure):
     _fields_ = [("fmtid", GUID), ("pid", ctypes.c_ulong)]
+
 
 class PROPVARIANT(ctypes.Structure):
     _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
                 ("r3", ctypes.c_ushort), ("p", ctypes.c_void_p), ("pad", ctypes.c_byte * 8)]
 
+
 def _G(a, b, c, d):
     return GUID(a, b, c, (ctypes.c_ubyte * 8)(*d))
+
 
 CLSID_MMDE = _G(0xBCDE0395, 0xE52F, 0x467C, (0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E))
 IID_IMMDE = _G(0xA95664D2, 0x9614, 0x4F35, (0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6))
@@ -31,10 +57,13 @@ PKEY_FN = PROPERTYKEY(_G(0xa45c254e, 0xdf1c, 0x4efd,
 
 _ole32 = ctypes.windll.ole32
 
+
 def _vt(p):
     return ctypes.cast(p, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
 
+
 def _enumerate(active_only=True):
+    """返回 [(名称, 设备ID), ...]"""
     _ole32.CoInitialize(None)
     pe = ctypes.c_void_p()
     hr = _ole32.CoCreateInstance(ctypes.byref(CLSID_MMDE), None, 1,
@@ -80,7 +109,9 @@ def _enumerate(active_only=True):
         out.append((name, did.value or ""))
     return out
 
+
 def current_device_id():
+    """当前 eConsole 的默认输出设备 ID"""
     _ole32.CoInitialize(None)
     pe = ctypes.c_void_p()
     if _ole32.CoCreateInstance(ctypes.byref(CLSID_MMDE), None, 1,
@@ -90,7 +121,7 @@ def current_device_id():
     GetDefault = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_int,
                                     ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(evt[4])
     dev = ctypes.c_void_p()
-    if GetDefault(pe, 0, 0, ctypes.byref(dev)) != 0:
+    if GetDefault(pe, 0, 0, ctypes.byref(dev)) != 0:      # eRender=0, eConsole=0
         return ""
     dvt = _vt(dev)
     GetId = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
@@ -99,7 +130,9 @@ def current_device_id():
     GetId(dev, ctypes.byref(did))
     return did.value or ""
 
+
 def set_default(device_id):
+    """把三个角色(eConsole/eMultimedia/eCommunications)都切到该设备"""
     _ole32.CoInitialize(None)
     pc = ctypes.c_void_p()
     hr = _ole32.CoCreateInstance(ctypes.byref(CLSID_PCC), None, 1,
@@ -117,11 +150,13 @@ def set_default(device_id):
             ok = False
     return ok
 
+
 def name_of(device_id):
     for nm, did in _enumerate(active_only=False):
         if did == device_id:
             return nm
     return "?"
+
 
 def save():
     did = current_device_id()
@@ -136,6 +171,7 @@ def save():
     except Exception as e:
         print("[audio] 保存失败: %s: %s" % (type(e).__name__, e), flush=True)
     return did
+
 
 def restore():
     try:
@@ -155,6 +191,7 @@ def restore():
         return True
     print("[audio] 还原失败（目标设备可能已拔掉）", flush=True)
     return False
+
 
 def main():
     a = sys.argv[1:]
@@ -192,6 +229,7 @@ def main():
         return 2
     print(__doc__)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

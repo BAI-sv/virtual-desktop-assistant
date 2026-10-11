@@ -1,4 +1,20 @@
 # -*- coding: utf-8 -*-
+"""
+nearby.py —— 附近设备发现 / 识别 / 上下线监控（只读、纯本地、零云请求）
+
+对应「华为智慧生活 / 易微联」找设备时用的那几种手段：
+    BLE 广播扫描（配网阶段主要靠这个）  +  mDNS/Bonjour  +  SSDP/UPnP  +  ARP 表
+
+设计边界（有意为之）：
+  * **只读**：只监听广播/组播和系统 ARP 表，不主动连设备、不登录任何云
+  * **不配网**：给新设备下发 WiFi 凭据属各家私有协议，本模块不做
+  * **不动端口**：默认不做网段端口扫描（更有侵入性）
+
+依赖（都可不装，缺哪个就自动降级并在结果里说明）：
+    bleak      —— BLE 扫描（Windows 走 WinRT）
+    zeroconf   —— mDNS/Bonjour
+    psutil     —— 网卡信息（可选）
+"""
 import os
 import re
 import socket
@@ -6,12 +22,15 @@ import subprocess
 import sys
 import time
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）。
+#   父进程没控制台时（pythonw / 计划任务），不加这个起 arp 就会弹终端。
 CREATE_NO_WINDOW = 0x08000000
 
-
+# --------------------------------------------------------------------------
+# MAC 前缀 -> 厂牌（只收录常见的 IoT 芯片/整机厂，认不出就留空、不猜）
+# --------------------------------------------------------------------------
 OUI = {
-
+    # Wi-Fi/BLE 模组（占智能家居大头）
     "24:0A:C4": "Espressif(ESP32)", "3C:71:BF": "Espressif", "84:CC:A8": "Espressif",
     "7C:DF:A1": "Espressif", "A4:CF:12": "Espressif", "C8:C9:A3": "Espressif",
     "D8:F1:5B": "Espressif", "34:AB:95": "Espressif", "48:27:E2": "Espressif",
@@ -22,7 +41,7 @@ OUI = {
     "D8:BF:C0": "Tuya/涂鸦", "10:52:1C": "Tuya/涂鸦", "68:57:2D": "Tuya/涂鸦",
     "50:8A:06": "Tuya/涂鸦", "18:69:D8": "Tuya/涂鸦", "3C:61:05": "Tuya/涂鸦",
     "00:1E:C0": "Broadlink", "78:A0:04": "Broadlink", "34:EA:34": "Broadlink",
-
+    # 整机厂
     "28:6C:07": "Xiaomi", "64:09:80": "Xiaomi", "78:11:DC": "Xiaomi", "50:EC:50": "Xiaomi",
     "8C:DE:52": "Yeelight", "04:CF:8C": "Yeelight", "68:AB:BC": "Yeelight",
     "00:1A:79": "Huawei", "EC:FA:5C": "Huawei", "5C:7D:5E": "Huawei",
@@ -31,12 +50,12 @@ OUI = {
     "B8:27:EB": "Raspberry Pi", "DC:A6:32": "Raspberry Pi",
     "E4:5F:01": "Raspberry Pi", "D8:3A:DD": "Raspberry Pi",
     "44:17:93": "Shelly", "C4:5B:BE": "Shelly",
-
+    # 电脑/虚拟
     "00:E0:4C": "Realtek", "18:C0:4D": "Giga-Byte", "1C:1B:0D": "Giga-Byte",
     "BC:24:11": "Proxmox/虚拟", "00:15:5D": "Hyper-V 虚拟网卡",
 }
 
-
+# BLE 广播里的 Company ID（只收录确定的；认不出就原样打印 0xXXXX）
 BLE_COMPANY = {
     0x004C: "Apple", 0x0006: "Microsoft", 0x0075: "Samsung", 0x00E0: "Google",
     0x0087: "Garmin", 0x0059: "Nordic", 0x02E5: "Espressif", 0x02E1: "Alibaba(阿里)",
@@ -44,7 +63,7 @@ BLE_COMPANY = {
     0x0078: "Bose", 0x008A: "Huawei", 0x01AB: "Xiaomi", 0x0171: "Amazon",
 }
 
-
+# BLE 服务 UUID -> 含义（小写、去横线后比较）
 SVC_MEAN = {
     "0000fe95": "小米 MiBeacon", "0000fe9f": "Google Fast Pair",
     "0000feb0": "阿里/涂鸦系私有", "0000feb3": "MTK/涂鸦系私有",
@@ -54,7 +73,7 @@ SVC_MEAN = {
     "0000fff0": "厂商私有", "0000fff1": "厂商私有", "0000fff2": "厂商私有",
 }
 
-
+# mDNS 服务类型 -> 人话
 MDNS_MEAN = {
     "_ewelink._tcp.local.": "易微联设备", "_tuya._tcp.local.": "涂鸦设备",
     "_miio._udp.local.": "小米 MiIO 设备", "_hap._tcp.local.": "HomeKit 设备",
@@ -69,6 +88,8 @@ MDNS_MEAN = {
 }
 
 
+# 本地可控性：哪些"附近设备"能真的连上、靠什么协议、要不要账号。
+#   只做开放/文档化的局域网协议探测，不发云请求、不碰私有配网协议；默认关闭（要显式开 probe）。
 LOCAL_PORTS = [
     (55443, "Yeelight 局域网（开放协议，需在该 App 里开 LAN 控制）"),
     (9999, "TP-Link Kasa 局域网（开放协议）"),
@@ -81,7 +102,7 @@ LOCAL_PORTS = [
     (1900, "UPnP / DLNA（媒体设备）"),
     (56700, "LIFX（开放协议）"),
 ]
-
+# 厂牌 -> 可控性结论
 CONTROL_HINT = [
     (("yeelight",), "可本地控制（Yeelight 开放协议，需先在 App 开 LAN 控制）"),
     (("tasmota", "esphome", "shelly"), "可本地控制（开放 HTTP/MQTT，无需账号）"),
@@ -102,7 +123,9 @@ CONTROL_HINT = [
     (("apple",), "Apple 设备：AirPlay/HomeKit，HomeKit 需配对码"),
 ]
 
+
 def control_hint(vendor, name=""):
+    """给一句"能不能连、靠什么"的结论。说不准就不说。"""
     blob = ((vendor or "") + " " + (name or "")).lower()
     for keys, text in CONTROL_HINT:
         if any(k in blob for k in keys):
@@ -110,6 +133,9 @@ def control_hint(vendor, name=""):
     return ""
 
 
+# 端口 -> 结论（**按端口号**判，绝不拿描述文字去过厂牌匹配器——
+# 注意：把 "Tasmota / Shelly / ESPHome" 这类描述喂给 control_hint，
+# 结果把只开了 80/443 的路由器也判成"可本地控制的开放设备"。）
 PORT_HINT = {
     55443: "可本地控制（Yeelight 开放协议）",
     9999: "可本地控制（TP-Link Kasa 开放协议）",
@@ -123,7 +149,9 @@ PORT_HINT = {
     1900: "支持 UPnP/DLNA（媒体类设备可投屏/控制）",
 }
 
+
 def verdict_from_ports(hits):
+    """按**命中的端口号**给结论，取最具体的那条。"""
     ranks = []
     for h in hits or []:
         v = PORT_HINT.get(h.get("port"))
@@ -134,7 +162,9 @@ def verdict_from_ports(hits):
     ranks.sort()
     return ranks[0][1]
 
+
 def probe_local(ip, timeout=0.7, ports=None):
+    """对一台主机试连几个**已知的开放 IoT 端口**（默认关闭，要显式调用）。"""
     hits = []
     for port, meaning in (ports or LOCAL_PORTS):
         s = socket.socket()
@@ -151,17 +181,22 @@ def probe_local(ip, timeout=0.7, ports=None):
                 pass
     return hits
 
+
 def _norm_uuid(u):
     return (u or "").lower().replace("-", "")
 
+
 def _norm_mac(mac):
     return (mac or "").upper().replace("-", "").replace(":", "").replace(".", "")
+
 
 _OUI_DB = None
 _OUI_PATH = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "..", "data", "oui.json"))
 
+
 def _load_oui():
+    """加载本地 IEEE OUI 表（58k 条，由 tools/fetch_oui.py 一次性抓取）。"""
     global _OUI_DB
     if _OUI_DB is not None:
         return _OUI_DB
@@ -174,7 +209,12 @@ def _load_oui():
         _OUI_DB = {}
     return _OUI_DB
 
+
 def vendor_of(mac):
+    """厂牌查询：先查本地 IEEE OUI 表（58k 条），再退回内置小表。
+
+    实测价值：AC:B7:22 -> QingdaoHaier（海尔）、30:52:23 -> GDMideaAirCo（美的空调）。
+    """
     m = _norm_mac(mac)
     if len(m) >= 6:
         db = _load_oui()
@@ -184,7 +224,9 @@ def vendor_of(mac):
                     return db[m[:n]]
     return OUI.get((mac or "").upper().replace("-", ":")[:8], "") or ""
 
+
 def guess_kind(vendor, name="", companies=None, services=None):
+    """按厂牌/名字/广播特征猜设备类型（说不准就少说，不硬猜）。"""
     v = (vendor or "") + " " + (name or "") + " " + " ".join(companies or []) \
         + " " + " ".join(services or [])
     low = v.lower()
@@ -214,6 +256,7 @@ def guess_kind(vendor, name="", companies=None, services=None):
             return label
     return ""
 
+
 def svc_meaning(uuids):
     out = []
     for u in uuids or []:
@@ -223,7 +266,11 @@ def svc_meaning(uuids):
     return sorted(set(out))
 
 
+# --------------------------------------------------------------------------
+# 各扫描器
+# --------------------------------------------------------------------------
 def scan_arp():
+    """读系统 ARP 表（被动，零依赖）。"""
     try:
         r = subprocess.run(["arp", "-a"], capture_output=True, text=True,
                            encoding="gbk", errors="replace", timeout=60,
@@ -242,7 +289,9 @@ def scan_arp():
         rows.append({"ip": ip, "mac": mac, "vendor": vendor_of(mac)})
     return rows
 
+
 def scan_ssdp(seconds=3):
+    """SSDP/UPnP 组播 M-SEARCH。只发一条标准发现包。"""
     msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
            "MAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n").encode()
     found = {}
@@ -269,9 +318,12 @@ def scan_ssdp(seconds=3):
         pass
     return [dict(ip=k, **v) for k, v in found.items()]
 
+
 MDNS_TYPES = list(MDNS_MEAN.keys()) + ["_services._dns-sd._udp.local."]
 
+
 def scan_mdns(seconds=4):
+    """mDNS/Bonjour 浏览常见 IoT 服务类型。"""
     try:
         from zeroconf import Zeroconf, ServiceBrowser
     except Exception as e:
@@ -313,11 +365,13 @@ def scan_mdns(seconds=4):
             zc.close()
         except Exception:
             pass
-
+    # _services._dns-sd 只是"有哪些类型"，没地址的不算设备
     svcs = [v for k, v in found.items() if v.get("addresses") or v.get("meaning")]
     return {"error": None, "services": svcs}
 
+
 def scan_ble(seconds=6):
+    """BLE 广播扫描 —— 配网阶段那些 App 主要靠这个。"""
     try:
         import asyncio
         from bleak import BleakScanner
@@ -361,6 +415,9 @@ def scan_ble(seconds=6):
             "devices": sorted(devs.values(), key=lambda d: -(d.get("rssi") or -999))}
 
 
+# --------------------------------------------------------------------------
+# 汇总 / 识别 / 监控
+# --------------------------------------------------------------------------
 def scan(ble_seconds=6, mdns_seconds=4, ssdp_seconds=3,
          do_ble=True, do_mdns=True, do_ssdp=True, do_arp=True, probe=False):
     t0 = time.time()
@@ -377,7 +434,7 @@ def scan(ble_seconds=6, mdns_seconds=4, ssdp_seconds=3,
         pass
     if do_arp:
         r["lan"] = scan_arp()
-
+        # 端口探测**默认关**（更有侵入性）。开了就对 ARP 到的每台主机试已知 IoT 端口。
         if probe:
             for d in r["lan"]:
                 d["ports"] = probe_local(d["ip"])
@@ -395,7 +452,9 @@ def scan(ble_seconds=6, mdns_seconds=4, ssdp_seconds=3,
     r["elapsed"] = round(time.time() - t0, 1)
     return r
 
+
 def identify(addr):
+    """给一个 MAC / BLE 地址，尽量说清它可能是什么。"""
     a = (addr or "").strip().upper()
     out = {"addr": a, "vendor": "", "kind": "", "hint": []}
     if not a:
@@ -404,8 +463,9 @@ def identify(addr):
     hx = _norm_mac(a)
     if len(hx) >= 2:
         try:
-
-
+            # IEEE 的 U/L 位：第一字节 bit1（第二个 nibble ∈ {2,6,A,E}）=1
+            # 表示【本地管理地址】= 操作系统随机生成的 MAC（手机/电脑常见）。
+            # 这种情况查不到厂牌是必然的，不该当成"未知厂商"。
             if int(hx[1], 16) in (2, 6, 10, 14):
                 out["randomized"] = True
         except Exception:
@@ -430,7 +490,9 @@ def identify(addr):
             out["hint"].append("OUI 表里查不到这个前缀 —— 我不猜")
     return out
 
+
 def _snapshot(ble_seconds=4):
+    """监控用的一次快照：LAN + BLE。"""
     snap = {}
     for d in scan_arp():
         snap["lan:" + d["mac"]] = {"kind": "lan", "key": d["mac"], "ip": d["ip"],
@@ -442,7 +504,9 @@ def _snapshot(ble_seconds=4):
                                        "ip": "", "name": nm, "rssi": d.get("rssi")}
     return snap
 
+
 def watch(seconds=20, ble_seconds=4, on_event=None):
+    """监控设备上下线，返回事件列表。这才是「自动」的体验内核。"""
     events = []
     first = _snapshot(ble_seconds)
     known = dict(first)
@@ -469,7 +533,9 @@ def watch(seconds=20, ble_seconds=4, on_event=None):
     return {"events": events, "baseline": list(first.values()),
             "elapsed": round(time.time() - t0, 1)}
 
+
 def summary(r):
+    """给人/给智能体看的中文摘要。"""
     L = []
     L.append("=== 附近设备（%s，耗时 %ss）===" % (r.get("ts", ""), r.get("elapsed", "?")))
     for n in r.get("notes", []):
@@ -494,8 +560,8 @@ def summary(r):
         svcs = m.get("services") or []
         L.append("【mDNS】%d 条" % len(svcs))
         for s in svcs[:12]:
-
-
+            # 实例名在部分 zeroconf 版本里拿不到（实测会返回 "0"），
+            # 所以显示以**服务类型**为准，实例名只在非空且不是纯数字时附上。
             _nm = s.get("label") or ""
             if not _nm or _nm.isdigit():
                 _nm = (s.get("type") or "").strip(".")
@@ -518,6 +584,7 @@ def summary(r):
             if ch:
                 L.append("        → %s" % ch)
     return "\n".join(L)
+
 
 if __name__ == "__main__":
     sec = int(sys.argv[1]) if len(sys.argv) > 1 else 6

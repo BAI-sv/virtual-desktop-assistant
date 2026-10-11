@@ -1,4 +1,49 @@
 # -*- coding: utf-8 -*-
+"""
+music_info.py —— Fairy 的「听歌识曲 · 歌词 · 创作背景 · 内涵分析」模块
+
+【用户要求】
+  "当我播放音乐的时候你应该自己去通过声音，音乐的比对去搜索歌词，
+   并给我分析这首歌的创作人，内涵等等类似的功能，你要自己学会扩展"
+
+【设计核心：可插拔的 InfoProvider 注册表】
+  每种能力 = 一个 provider，注册进 PROVIDERS。加新能力**不用改主流程**。
+      class InfoProvider:
+          name = ""
+          def available(self) -> bool
+          def fetch(self, meta: dict) -> dict
+  collect() 会**依次调用**每个 provider，且**每个独立 try** —— 一个挂了不影响别的。
+
+【⚠️ 关于"通过声音比对识别歌曲"（音频指纹）—— 本机没装，但【有免费路径】】
+  ❌ "本机没装"不等于"做不到"，免费/开源路径确实存在：
+
+  1. **SongRec** —— 开源免费的 Shazam 客户端（Rust 写的）
+     https://github.com/marin-m/SongRec ；包管理：Snap/FreeBSD ports，Windows 有第三方构建
+  2. **Chromaprint + AcoustID** —— 开源免费（AcoustID 只需注册一个【免费】API key）
+     Python 绑定：`pip install pyacoustid`；另需 `fpcalc.exe`（Chromaprint 自带的命令行工具）
+  3. **AudD** —— 有免费试用额度
+  4. **ACRCloud** —— 这类才是付费的
+
+  → 所以"听歌识曲"是**可实现的**，只是**需要装一个工具 + （AcoustID 路线）注册免费 key**。
+     用户没同意装东西之前，我不擅自装（用户明确说过"不要自作主张"）。
+
+【本模块当前的实际路径】
+  **从播放器元数据（GSMTC）拿歌名/歌手 → 再去查歌词/资料**。
+  - 播放器给了元数据 → 正常工作
+  - 播放器没给（浏览器放网页音频、无名音源）→ **诚实返回"元数据缺失，无法识别"**，绝不瞎猜歌名
+  - 想要真指纹识别 → 见下面的 `fingerprint` 扩展位（已写好接口形状，等装了工具就能接）
+
+【数据源（已实测可用）】
+  元数据  Windows GSMTC（WinRT，无需装东西）—— 一次 PowerShell 调用返回 JSON
+  歌词    LRCLIB  https://lrclib.net/api/search?q=...   （免费开源，无需 key，需 User-Agent）
+          返回 plainLyrics（纯歌词）+ syncedLyrics（LRC 时间轴）
+
+【用法】
+  py -3.12 music_info.py              看当前在播什么 + 收集信息
+  py -3.12 music_info.py --selftest   自测（含构造 meta 测歌词）
+  py -3.12 music_info.py --json       只输出 JSON
+  py -3.12 music_info.py --which lyrics   只要某一项
+"""
 import json
 import os
 import subprocess
@@ -8,28 +53,38 @@ import urllib.parse
 import urllib.request
 import fairy_root
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）
 CREATE_NO_WINDOW = fairy_root.CREATE_NO_WINDOW
 
 LOG = fairy_root.LOGS
 CACHE = os.path.join(LOG, "lyrics_cache.json")
 UA = {"User-Agent": "VirtualDesktopAssistant/1.0 (personal; DSH plugin)"}
 
+# ==========================================================================
+# provider 基类 + 注册表
+# ==========================================================================
+
 
 class InfoProvider:
+    """一个"信息提供者"。加新能力就继承它并 register()。"""
     name = ""
     label = ""
-
+    #: 需要什么才能真正工作（用于 available() 说明原因）
     requires = ""
 
     def available(self):
+        """能不能用。返回 False 时 collect() 会记一条 skipped，而不是报错。"""
         return True
 
     def fetch(self, meta):
+        """meta: {title, artist, album, album_artist, app, playing}
+        返回 dict（内容自由，建议带 "ok" 字段）。**不要在里面对 meta 做假设。**"""
         raise NotImplementedError
+
 
 PROVIDERS = {}
 ORDER = []
+
 
 def register(p):
     PROVIDERS[p.name] = p
@@ -38,6 +93,9 @@ def register(p):
     return p
 
 
+# ==========================================================================
+# ① meta provider —— 曲目基本信息
+# ==========================================================================
 class MetaProvider(InfoProvider):
     name = "meta"
     label = "曲目信息"
@@ -55,6 +113,9 @@ class MetaProvider(InfoProvider):
         return out
 
 
+# ==========================================================================
+# ② lyrics provider —— LRCLIB 查歌词（纯歌词 + 时间轴）
+# ==========================================================================
 def _load_cache():
     try:
         if os.path.exists(CACHE):
@@ -62,6 +123,7 @@ def _load_cache():
     except Exception:
         pass
     return {}
+
 
 def _save_cache(c):
     try:
@@ -72,12 +134,15 @@ def _save_cache(c):
     except Exception:
         pass
 
+
 def _http_json(url, timeout=12):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
+
 class LyricsProvider(InfoProvider):
+    """LRCLIB：免费开源歌词库，无需 key。返回纯歌词 + LRC 时间轴。"""
     name = "lyrics"
     label = "歌词（LRCLIB）"
     requires = "能联网；歌名/歌手"
@@ -97,7 +162,7 @@ class LyricsProvider(InfoProvider):
 
         res = {"ok": False, "source": "lrclib.net", "title": title, "artist": artist}
 
-
+        # 1) 精确接口（要 artist + track）
         if artist:
             try:
                 u = ("https://lrclib.net/api/get?artist_name=%s&track_name=%s"
@@ -110,9 +175,9 @@ class LyricsProvider(InfoProvider):
                                 "synced": j.get("syncedLyrics") or "",
                                 "matched_by": "精确匹配"})
             except Exception:
-                pass
+                pass  # 落到搜索
 
-
+        # 2) 搜索接口兜底
         if not res.get("ok"):
             try:
                 q = "%s %s" % (title, artist) if artist else title
@@ -133,11 +198,11 @@ class LyricsProvider(InfoProvider):
         if not res.get("ok") and "why" not in res:
             res["why"] = "LRCLIB 没找到这首歌（换 web_search 搜'歌名 歌词'是下一步）"
 
-
+        # 3) 简繁提示（LRCLIB 上不少中文歌词是繁体 —— 实测"晴天"就是）
         if res.get("ok"):
             pl = res.get("plain") or ""
             if pl:
-
+                # 只做提示，不擅自转换（用户偏好：不要自作主张）
                 common_trad = "嗎麼樣這個還聽無法對說過時間點"
                 hits = sum(1 for ch in common_trad if ch in pl)
                 if hits >= 2:
@@ -148,13 +213,22 @@ class LyricsProvider(InfoProvider):
         return res
 
 
+# ==========================================================================
+# ③④ 扩展位 —— 需要 LLM / 联网搜索，由调用方（主代理或球）补上
+# ==========================================================================
 class BackgroundProvider(InfoProvider):
+    """创作背景。**需要搜索或 LLM，本模块不自己实现**，只提供结构化接口。
+
+    调用方拿到 fetch() 的返回后，应当：
+        web_search(f"{artist} {title} 创作背景 创作故事")
+    再把结果写回 meta 或直接展示。
+    """
     name = "background"
     label = "创作背景（需调用方搜索）"
     requires = "调用方的 web_search 或 LLM"
 
     def available(self):
-        return False
+        return False  # 本模块内不可用 —— 诚实标记，不假装能查
 
     def fetch(self, meta):
         return {"ok": False,
@@ -163,7 +237,9 @@ class BackgroundProvider(InfoProvider):
                     meta.get("artist") or "", meta.get("title") or ""),
                 "expected_shape": {"ok": True, "text": "……", "sources": ["url"]}}
 
+
 class MeaningProvider(InfoProvider):
+    """内涵分析。**需要 LLM**，同样只留接口。"""
     name = "meaning"
     label = "内涵分析（需 LLM）"
     requires = "调用方把歌词交给 LLM"
@@ -180,13 +256,21 @@ class MeaningProvider(InfoProvider):
                     "4) 可能的创作意图。用中文，简洁分点。"),
                 "expected_shape": {"ok": True, "text": "……"}}
 
+
 class FingerprintProvider(InfoProvider):
+    """音频指纹识别（真·听歌识曲）。**需先装工具，本模块内暂不可用。**
+
+    免费/开源路径（2026-08-10 上网核实，之前我误判成"只能付费"）：
+      A) SongRec（开源 Shazam 客户端，Rust）—— 直接出歌名/歌手
+      B) Chromaprint(fpcalc) + AcoustID（免费 API key）—— pyacoustid 绑定
+    装上并配好后，把下面的 fetch() 实现即可（接口形状已经定好，主流程不用改）。
+    """
     name = "fingerprint"
     label = "音频指纹识别"
     requires = "SongRec 或 fpcalc+pyacoustid（都未安装）"
 
     def available(self):
-
+        # 装好了就自动可用 —— 探测 fpcalc / songrec 是否在 PATH
         import shutil as _sh
         return bool(_sh.which("fpcalc") or _sh.which("songrec"))
 
@@ -200,6 +284,7 @@ class FingerprintProvider(InfoProvider):
                     ]}
         return {"ok": False, "why": "工具在但本模块还没实现调用（接口已留好）"}
 
+
 register(MetaProvider())
 register(LyricsProvider())
 register(BackgroundProvider())
@@ -207,6 +292,9 @@ register(MeaningProvider())
 register(FingerprintProvider())
 
 
+# ==========================================================================
+# GSMTC —— 拿当前在播的曲目元数据（一次 PowerShell 调用返回 JSON）
+# ==========================================================================
 _PS = r'''
 $ErrorActionPreference='SilentlyContinue'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
@@ -237,19 +325,25 @@ try {
 $out | ConvertTo-Json -Compress
 '''
 
+
 def now_playing(timeout=40):
+    """返回 {ok, title, artist, album, album_artist, app, playing} 或 {ok:False, why}。
+
+    ⚠ 一次 PowerShell 调用（0.4~0.6s 启动开销，所以绝不每步启一次）。
+    ⚠ 只读：绝不 pause/play，不干扰用户正在听的东西。
+    """
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS],
                            capture_output=True, timeout=timeout,
                            creationflags=CREATE_NO_WINDOW)
         out = (r.stdout or b"").decode("utf-8", "replace").strip()
-
+        # PowerShell 输出可能是单行 JSON
         if not out:
             return {"ok": False, "why": "PowerShell 无输出"}
         j = json.loads(out)
         if not isinstance(j, dict):
             return {"ok": False, "why": "返回格式异常"}
-
+        # 规范化（GSMTC 的空字段可能给空串）
         for k in ("title", "artist", "album", "album_artist", "app", "playing"):
             if k in j and isinstance(j[k], str):
                 j[k] = j[k].strip()
@@ -262,9 +356,18 @@ def now_playing(timeout=40):
         return {"ok": False, "why": "读取失败: %s" % str(e)[:120]}
 
 
+# ==========================================================================
+# collect —— 依次调 providers，每个独立 try
+# ==========================================================================
 LAST_KEY = {"v": None}
 
+
 def collect(meta=None, which=None):
+    """收集信息。meta=None 时自己取当前在播。
+
+    which: None=全部 / "lyrics" / "meta" / [...]
+    返回 {"now": meta, "items": {name: result}, "changed": bool}
+    """
     if meta is None:
         meta = now_playing()
     res = {"now": meta, "items": {}}
@@ -290,11 +393,14 @@ def collect(meta=None, which=None):
                 continue
             res["items"][n] = p.fetch(meta)
         except Exception as e:
-
+            # 独立 try —— 一个 provider 挂了不影响其他
             res["items"][n] = {"ok": False, "why": "provider 异常: %s" % str(e)[:120]}
     return res
 
 
+# ==========================================================================
+# 自测
+# ==========================================================================
 def selftest():
     print("=" * 66)
     print("music_info 自测   %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -385,6 +491,7 @@ def selftest():
     print("%d 通过 / %d 失败" % (passed, failed))
     return 0 if failed == 0 else 1
 
+
 def main():
     if "--selftest" in sys.argv:
         return selftest()
@@ -423,6 +530,7 @@ def main():
         else:
             print("   ✗ %-22s %s" % (lab, v.get("why")))
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,4 +1,42 @@
+#!/usr/bin/env python3
+"""strata_ask.py — 把「该想」类问题发给本地 Strata 模型
 
+【为什么要这个东西】
+  用户的输出策略把任务分成两类：
+    · 直答类（数字/日期/定义/翻译/查表/回显）-> 主 agent 自己做，秒答
+    · 该想类（多步推理/方案权衡/写作/调试/歧义需求）-> 推给别的 AI
+  Strata 是本地部署的 OpenAI 兼容服务（E:\\Strata，端口 8080），
+  调用【零 API 费用】，代价是慢（实测约 10 tok/s，600 token 的回答约 50 秒）。
+
+【为什么不用 DSH 的 provider 系统】
+  DSH 内置 provider 只有 deepseek-account / deepseek-official，
+  加自定义 provider 要改 app.asar。而 Strata 是标准 HTTP 服务，直接调更简单。
+
+【★★ 关键：思考会吃光 max_tokens】
+  实测（2026-10-10）：一个"方案权衡"问题，max_tokens=700 全被思考用光，
+  content 返回空字符串 —— 因为 reasoning 和 content 共享同一个 token 配额。
+  Strata 提供两个字段治它（读 E:\\Strata\\serve\\server.py 确认）：
+    · reasoning_effort        : none | low | medium | high
+    · reasoning_budget_tokens : 整数，0 = 无预算；到点会强制收尾出答案
+  本工具默认 reasoning_budget_tokens=800，就是为了保证答案一定有配额。
+
+【用法】
+  py -3.12 strata_ask.py "你的问题"
+  py -3.12 strata_ask.py --status                     # 只看服务状态
+  py -3.12 strata_ask.py --json "问题"                 # 输出 JSON，便于解析
+  py -3.12 strata_ask.py --effort high --budget 1500 "难题"
+  py -3.12 strata_ask.py --no-think "简单但需要它答的问题"
+  py -3.12 strata_ask.py --reasoning "问题"            # 连思考过程一起打印
+  py -3.12 strata_ask.py --system "你是审稿人" "问题"
+  py -3.12 strata_ask.py --file 问题.txt
+  py -3.12 strata_ask.py --stream "问题"               # 流式，能看进度
+  py -3.12 strata_ask.py --save "问题"                 # 答案存到 logs/strata/
+
+【★ 在 DSH 里调用时【必须用后台任务】
+  中等问题约 50 秒，而工具默认超时约 30 秒，前台跑会被杀掉。
+
+【配置】地址优先级：--url > 环境变量 STRATA_URL > fairy_root.STRATA_URL > 127.0.0.1:8080
+"""
 
 import argparse
 import json
@@ -13,12 +51,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 DEFAULT_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT = 600
 DEFAULT_MAX_TOKENS = 2500
-
-
+# ★★ 思考预算要【小】（实测 2026-10-10）：
+#    budget=200 -> 思考 392 字就收尾，答案 2340 字 ✓
+#    budget=1200 -> 思考照样吃光 2000，答案为空 ✗
+#    不给预算  -> 思考膨胀到 7396 字，把 4000 全吃掉，答案为空 ✗
+#   道理：预算是"到点强制收尾"，不是"允许它想这么多"。
 DEFAULT_BUDGET = 300
 EFFORTS = ("none", "low", "medium", "high")
 
+
 def resolve_url(cli_url=None):
+    """地址优先级：--url > 环境变量 > fairy_root 配置 > 默认。"""
     if cli_url:
         return cli_url.rstrip("/")
     env = os.environ.get("STRATA_URL")
@@ -34,7 +77,9 @@ def resolve_url(cli_url=None):
         pass
     return DEFAULT_URL
 
+
 def http_json(url, payload=None, timeout=30):
+    """发一个 JSON 请求；返回 (ok, data_or_errmsg)。"""
     data = None
     headers = {"Content-Type": "application/json"}
     if payload is not None:
@@ -57,12 +102,14 @@ def http_json(url, payload=None, timeout=30):
     except Exception as e:
         return False, "%s: %s" % (type(e).__name__, e)
 
+
 def service_status(base):
     ok, d = http_json(base + "/api/health", timeout=8)
     if ok and isinstance(d, dict) and d.get("status") == "ok":
         return True, "model=%s ctx=%s loaded=%s" % (
             d.get("model", "?"), d.get("max_context", "?"), d.get("loaded")), d.get("model")
     return False, str(d)[:200], None
+
 
 def pick_model(base, override=None):
     if override:
@@ -74,7 +121,9 @@ def pick_model(base, override=None):
             return arr[0]["id"]
     return "strata"
 
+
 def build_payload(model, messages, max_tokens, temperature, effort, budget, stream):
+    """组装请求体。effort/budget 见模块文档。"""
     p = {
         "model": model,
         "messages": messages,
@@ -90,7 +139,9 @@ def build_payload(model, messages, max_tokens, temperature, effort, budget, stre
         p["reasoning_budget_tokens"] = 0
     return p
 
+
 def ask_stream(base, payload, timeout):
+    """流式请求，边收边打印。返回 (content, reasoning, usage)。"""
     payload = dict(payload)
     payload["stream"] = True
     req = urllib.request.Request(
@@ -124,6 +175,7 @@ def ask_stream(base, payload, timeout):
     print()
     return "".join(content), "".join(reasoning), usage
 
+
 def ask_once(base, payload, timeout):
     ok, d = http_json(base + "/v1/chat/completions", payload, timeout=timeout)
     if not ok:
@@ -134,6 +186,16 @@ def ask_once(base, payload, timeout):
             (d.get("usage") or {}), None)
 
 
+# ---------------------------------------------------------------------------
+# 自适应分类：直答类不跑推理，该想类才跑
+#
+#   直答类（数字/日期/定义/翻译/查表/代码语法/事实回显）-> 不调用逻辑
+#   该想类（多步推理/方案权衡/写作创作/代码调试/歧义需求/权衡建议）-> 进行逻辑推理
+#
+# 设计取舍：
+#   · 规则优先 —— 零成本、毫秒级；拿不准【不拉满】，用 medium 中间档
+#   · 宁可略偏"该想"也不要误判成"直答"，因为答错的代价大于多跑一次思考
+# ---------------------------------------------------------------------------
 DIRECT_HINTS = (
     "翻译", "什么意思", "是什么", "什么是", "定义", "谁是", "哪一年", "哪年",
     "多少", "几号", "几点", "星期几", "拼写", "怎么读", "全称", "缩写",
@@ -150,7 +212,16 @@ THINK_HINTS = (
 CODE_HINTS = ("def ", "class ", "import ", "Traceback", "SELECT ", "function ",
               "报错", "异常", "error", "Error", "```")
 
+
 def classify(q):
+    """按「直答 vs 该想」策略判断该怎么跑。
+
+    返回 (kind, effort, budget, why)：
+      kind   : 'direct' | 'think'
+      effort : reasoning_effort 的值
+      budget : reasoning_budget_tokens（思考预算）
+      why    : 为什么这么判（打印出来便于核对）
+    """
     s = (q or "").strip()
     n = len(s)
     low = s.lower()
@@ -159,26 +230,27 @@ def classify(q):
     direct_hits = [h for h in DIRECT_HINTS if h in s]
     code_hit = [h for h in CODE_HINTS if (h in s or h in low)]
 
-
+    # 1) 明确的该想信号
     if think_hits:
         return "think", "high", 400, "命中该想特征：" + "、".join(think_hits[:3])
-
+    # 2) 含代码 / 报错 -> 该想
     if code_hit:
         return "think", "high", 400, "含代码或报错：" + "、".join(code_hit[:2])
-
+    # 3) 明确的直答信号 + 不长 -> 直答
     if direct_hits and n <= 80:
         return "direct", "none", 0, "命中直答特征：" + "、".join(direct_hits[:3])
-
+    # 4) 极短（回执 / 闲聊）-> 直答
     if n <= 15:
         return "direct", "none", 0, "极短（%d 字），按回执/闲聊处理" % n
-
+    # 5) 短但没命中任何特征 -> 拿不准，中间档（不拉满，也不完全不思考）
     if n <= 60:
         return "think", "medium", 300, "短（%d 字）但未命中直答特征，用中间档" % n
-
+    # 6) 很长 -> 多半要多步推理
     if n >= 150:
         return "think", "high", 400, "问题较长（%d 字），多半需要多步推理" % n
-
+    # 7) 其余 -> 中间档
     return "think", "medium", 300, "未命中明确特征，用中间档（不拉满）"
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -233,7 +305,7 @@ def main():
         print("★ Strata 服务没起来（%s）：%s" % (base, info), file=sys.stderr)
         return 2
 
-
+    # ---- 自适应：没显式指定就自动分类（直答类不跑推理，该想类才跑）----
     if args.no_think:
         kind, effort, budget, why = "direct", "none", 0, "用户指定 --no-think"
     elif args.effort is not None or args.budget is not None:
@@ -244,7 +316,7 @@ def main():
     else:
         kind, effort, budget, why = classify(question)
 
-
+    # 直答类不需要思考预算
     if effort == "none":
         budget = 0
 
@@ -336,6 +408,7 @@ def main():
             print("   已存：%s" % fn)
 
     return 0 if not empty else 3
+
 
 if __name__ == "__main__":
     sys.exit(main())

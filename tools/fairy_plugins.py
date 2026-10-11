@@ -1,3 +1,17 @@
+r"""
+FairyX 实时功能插件集 fairy_plugins.py
+六项功能（全部离线/免费可用，大脑走本地 Ollama）：
+  1) 天气变化实时提醒   weather_check / --weather
+  2) 代码实时纠错       code_lint / --lint 文件
+  3) 文案格式检查       text_check / --check "文案"
+  4) 网页/选中文本翻译  translate / --translate "文本"
+  5) 视频本地实时字幕   video_subtitle / --subtitle 视频文件（faster-whisper 离线）
+  6) 歌词显示           lyrics / --lyrics "歌名"
+  监控模式：--watch 定时检查天气 + 剪贴板文案/翻译 + 活动代码文件，变化时桌面弹窗提醒。
+
+用法：py -3.12 tools/fairy_plugins.py [--weather | --lint 文件.py | --check 文案 |
+      --translate 文本 | --subtitle 视频.mp4 | --lyrics 歌名 | --watch]
+"""
 import argparse
 import base64
 import hashlib
@@ -13,14 +27,15 @@ import time
 import urllib.parse
 import urllib.request
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）。
+#   父进程没控制台时（pythonw / 计划任务），不加这个起 ffmpeg/powershell 就弹终端。
 CREATE_NO_WINDOW = 0x08000000
 
 PY = sys.executable or "py -3.12"
 OLLAMA = r"http://127.0.0.1:11434/v1/chat/completions"
-VISION = r"http://127.0.0.1:8085/v1/chat/completions"
+VISION = r"http://127.0.0.1:8085/v1/chat/completions"   # Qwen3-VL llama-server（Vulkan）
 
-
+# FairyX 根目录：由脚本位置推导（tools/ 的上一级）
 HERE = os.path.dirname(os.path.abspath(__file__))
 D = os.path.dirname(HERE)
 
@@ -34,7 +49,10 @@ for _cand in (os.path.join(D, "tools", "ffmpeg.exe"),
         break
 
 
+# ---------------- 通用 ----------------
+
 def notify(title, msg):
+    """Windows 桌面弹窗提醒"""
     try:
         ps = ('powershell -NoProfile -Command "New-Object -ComObject WScript.Shell; '
               '[System.Windows.Forms.MessageBox]::Show(\\\"%s\\\", \\\"%s\\\")" '
@@ -43,7 +61,9 @@ def notify(title, msg):
     except Exception:
         print("[提醒] %s: %s" % (title, msg))
 
+
 def brain(text, system=""):
+    """调本地大脑（Ollama 原生 /api/chat + think:false，0.2s 无思考）"""
     payload = {
         "model": "qwen3.8-27b",
         "messages": [
@@ -62,6 +82,7 @@ def brain(text, system=""):
     except Exception as e:
         return "[大脑不可用: %s]" % e
 
+
 def http_get(url, timeout=20, headers=None):
     try:
         req = urllib.request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
@@ -69,13 +90,16 @@ def http_get(url, timeout=20, headers=None):
     except Exception as e:
         return ""
 
+# ---------------- 1. 天气 ----------------
 
 WCODE = {0: "晴", 1: "大部晴朗", 2: "多云", 3: "阴", 45: "雾", 48: "雾凇", 51: "毛毛雨",
          53: "小雨", 55: "中雨", 61: "小雨", 63: "中雨", 65: "大雨", 71: "小雪", 73: "中雪",
          75: "大雪", 80: "阵雨", 81: "强阵雨", 82: "暴雨", 85: "阵雪", 86: "强阵雪",
          95: "雷雨", 96: "雷雨伴冰雹", 99: "强雷雨伴冰雹"}
 
+
 def weather_check(lat=39.90, lon=116.40, place="北京"):
+    """Open-Meteo 免费查询（无需 key），返回 (描述文本, 是否天气代码变化)"""
     url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
            "&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m"
            "&timezone=Asia/Shanghai" % (lat, lon))
@@ -95,19 +119,22 @@ def weather_check(lat=39.90, lon=116.40, place="北京"):
         return "天气解析失败: %s" % e, False
 
 
+# ---------------- 2. 代码纠错 ----------------
+
 def code_lint(path):
+    """语法检查 + 大脑分析错误"""
     if not os.path.exists(path):
         return "文件不存在: %s" % path
     with open(path, encoding="utf-8", errors="ignore") as f:
         code = f.read()
-
+    # 内置语法检查（零依赖，秒级）
     issues = []
     if path.endswith(".py"):
         try:
             compile(code, path, "exec")
         except SyntaxError as e:
             issues.append("语法错误 行%s: %s" % (e.lineno, e.msg))
-
+    # 简单常见问题
     for i, line in enumerate(code.splitlines(), 1):
         if len(line) > 100:
             issues.append("行%s 过长(%d字符)，建议换行" % (i, len(line)))
@@ -118,12 +145,16 @@ def code_lint(path):
     return "发现 %d 个问题：%s\n\n大脑建议：\n%s" % (len(issues), "；".join(issues), detail)
 
 
+# ---------------- 3. 文案格式检查 ----------------
+
 def text_check(text):
     if not text.strip():
         return "没有可检查的文案"
     return brain("检查下面文案的错别字、标点、格式问题，逐条列出并给出修改后版本：\n%s" % text[:1500],
                  system="你是中文文案校对助手，输出：问题清单 + 修改后全文。")
 
+
+# ---------------- 4. 翻译 ----------------
 
 def translate(text):
     if not text.strip():
@@ -134,14 +165,18 @@ def translate(text):
                  system="你是专业翻译，只输出译文，不要解释。")
 
 
+# ---------------- 5. 视频字幕 ----------------
+
 def video_subtitle(video_path, out_dir=None):
+    """视频 → ffmpeg 提取 16k 单声道 → faster-whisper 离线转写 → srt 字幕
+    （不经过 PyAV 解码，直接用 numpy 喂 whisper，规避版本兼容坑）"""
     if not os.path.exists(video_path):
         return "视频不存在: %s" % video_path
     out_dir = out_dir or os.path.dirname(video_path)
     base = os.path.splitext(os.path.basename(video_path))[0]
     raw_audio = os.path.join(out_dir, base + "_audio.f32")
     srt = os.path.join(out_dir, base + ".srt")
-
+    # 1) 提取音轨为 16k 单声道 f32le 裸流
     if FFMPEG:
         r = subprocess.run([FFMPEG, "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
                             "-f", "f32le", raw_audio],
@@ -151,7 +186,7 @@ def video_subtitle(video_path, out_dir=None):
             return "音轨提取失败: %s" % (r.stderr or "")[-300:]
     else:
         return "未找到 ffmpeg，无法提取音轨（需要 %s）" % video_path
-
+    # 2) 读取为 numpy 数组
     try:
         import numpy as np
     except ImportError:
@@ -162,7 +197,7 @@ def video_subtitle(video_path, out_dir=None):
         return "音频读取失败: %s" % e
     if audio.size == 0:
         return "音频为空（该文件可能没有音轨）"
-
+    # 3) whisper 转写（用 float32 数组，跳过 PyAV）
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -188,7 +223,10 @@ def video_subtitle(video_path, out_dir=None):
     return "字幕已生成：%s（%d 条）" % (srt, len(lines))
 
 
+# ---------------- 6. 歌词 ----------------
+
 def lyrics(song):
+    """网易云 API 搜歌 → 歌词（免费）"""
     esc = urllib.parse.quote(song)
     raw = http_get("https://music.163.com/api/search/get/web?s=%s&type=1&limit=1" % esc)
     if not raw:
@@ -203,12 +241,15 @@ def lyrics(song):
         lrc = json.loads(raw2)["lrc"]["lyric"]
     except Exception:
         return "该歌曲暂无歌词"
-
+    # 去掉时间轴
     text = re.sub(r"\[\d+:\d+(?:\.\d+)?\]", "", lrc)
     return "《%s》歌词：\n%s" % (name, text.strip()[:1500])
 
 
+# ---------------- 7. 看图/反推（Qwen3-VL 视觉服务 8085） ----------------
+
 def image_vision(img_path, mode="反推"):
+    """看图描述 / 反推提示词（本地 Qwen3-VL-8B，Vulkan llama-server）"""
     if not os.path.exists(img_path):
         return "图片不存在: %s" % img_path
     try:
@@ -244,7 +285,13 @@ def image_vision(img_path, mode="反推"):
         return "视觉服务不可用（需先启动 Qwen3-VL：tools/llama_vl_start.bat）：%s" % e
 
 
+# ---------------- 8. 听歌识曲（录音 + shazamio 免费免Key识别 + 自动歌词） ----------------
+# 2026-10-10 换成 shazamio：逆向 Shazam 公开接口，免费、免注册、无需 Key。
+# 备选：ACRCloud（需注册 key，见 docs/ACRCloud听歌识曲注册说明.md），代码保留在文件末尾注释。
+
+
 def record_audio(seconds=12):
+    """麦克风录音 → wav 字节（16k 单声道）"""
     try:
         import sounddevice as sd
         import numpy as np
@@ -267,7 +314,9 @@ def record_audio(seconds=12):
         w.writeframes(data16.tobytes())
     return buf.getvalue(), None
 
+
 def song_identify(seconds=12):
+    """录音 → shazamio（免费免key）识别歌曲 → 自动显示歌词"""
     print("  正在录音 %d 秒（请让音乐/歌声进入麦克风）..." % seconds)
     wav, err = record_audio(seconds)
     if err:
@@ -279,7 +328,7 @@ def song_identify(seconds=12):
         return "需要 shazamio：py -3.12 -m pip install shazamio"
     try:
         out = asyncio.run(Shazam().recognize_song(data=wav))
-
+        # 新版返回 dict：{"matches":[{"track":{"title","subtitle"}}]}；旧版返回对象带 .track
         if isinstance(out, dict):
             matches = out.get("matches") or []
             track = (matches[0].get("track") or {}) if matches else {}
@@ -299,7 +348,12 @@ def song_identify(seconds=12):
     return out_txt
 
 
+# ---------------- 9. 自动歌词（SMTC 检测正在播放 → 歌名 → 歌词） ----------------
+# 原理：Windows 系统媒体控制（SMTC）——网易云/QQ音乐/浏览器等播放时都会上报
+# "正在播放的歌曲"，FairyX 直接读标题+歌手 → 查歌词，不需要录音识曲。
+
 def get_now_playing():
+    """读取系统正在播放的歌曲 (title, artist)；无播放返回 None。"""
     try:
         import asyncio
         from winrt.windows.media.control import (
@@ -320,7 +374,9 @@ def get_now_playing():
     except Exception:
         return None
 
+
 def autolyric(interval=5):
+    """监听模式：每几秒查一次正在播放的歌曲，切歌就自动显示歌词。Ctrl+C 退出。"""
     print("自动歌词监听中（检测到播放/切歌自动显示歌词，Ctrl+C 退出）...")
     last = None
     try:
@@ -336,12 +392,14 @@ def autolyric(interval=5):
     except KeyboardInterrupt:
         print("\n已退出自动歌词监听")
 
+
 def watch(interval=300):
+    """定时：天气变化 + 剪贴板文案/翻译（快捷键手动）+ 活动代码文件检查"""
     print("FairyX 实时监控已启动（每 %ds 检查一次，Ctrl+C 停止）" % interval)
     last_weather = None
     last_clip = ""
     while True:
-
+        # 天气
         try:
             w, changed = weather_check()
             if changed or (last_weather and w != last_weather):
@@ -349,7 +407,7 @@ def watch(interval=300):
             last_weather = w
         except Exception:
             pass
-
+        # 剪贴板监控（粘贴时自动检查/翻译）
         try:
             clip = subprocess.run(["powershell", "-NoProfile", "-Command",
                                    "Get-Clipboard -Raw"], capture_output=True,
@@ -358,7 +416,7 @@ def watch(interval=300):
             if clip and clip != last_clip and len(clip) > 4 and len(clip) < 400:
                 last_clip = clip
                 if re.search(r"[\u4e00-\u9fff]", clip[:100]):
-
+                    # 中文→检查文案；英文→翻译
                     if len(re.findall(r"[\u4e00-\u9fff]", clip)) > 30:
                         r = text_check(clip)
                         notify("文案检查", r[:300])
@@ -370,7 +428,10 @@ def watch(interval=300):
         time.sleep(interval)
 
 
+# ---------------- 10. 定时提醒 + 系统健康（生活/工作补全） ----------------
+
 def remind(expr):
+    """定时提醒：--remind "10分钟后 喝水" / "8:30 开会" / "1小时后 起来活动" """
     m = re.match(r"^(\d+)\s*(分钟|秒)后\s*(.+)$", expr)
     m2 = re.match(r"^(\d{1,2}):(\d{2})\s*(.+)$", expr)
     m3 = re.match(r"^(\d+)\s*小时后\s*(.+)$", expr)
@@ -403,7 +464,9 @@ def remind(expr):
     threading.Thread(target=_fire, daemon=True).start()
     return "提醒已设置（%s 后）" % wait_txt
 
+
 def sysinfo():
+    """系统健康一览：CPU/内存/磁盘/网络/运行时长"""
     import platform
     lines = ["===== FairyX 系统健康 ====="]
     lines.append("系统: %s %s" % (platform.system(), platform.release()))
@@ -430,6 +493,7 @@ def sysinfo():
         lines.append("（未安装 psutil，跳过指标；py -3.12 -m pip install psutil）")
     return "\n".join(lines)
 
+
 def _fmt(n):
     for u in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -437,12 +501,15 @@ def _fmt(n):
         n /= 1024
     return "%.1fPB" % n
 
+
 def _fmt_sec(s):
     d, r = divmod(int(s), 86400)
     h, r = divmod(r, 3600)
     m, s = divmod(r, 60)
     return "%d天%d小时%d分%d秒" % (d, h, m, s)
 
+
+# ---------------- CLI ----------------
 
 def main():
     ap = argparse.ArgumentParser(description="FairyX 实时功能插件")
@@ -488,6 +555,7 @@ def main():
         print(sysinfo())
     else:
         ap.print_help()
+
 
 if __name__ == "__main__":
     main()

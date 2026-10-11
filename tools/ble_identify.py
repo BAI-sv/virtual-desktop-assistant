@@ -1,4 +1,25 @@
 # -*- coding: utf-8 -*-
+"""
+ble_identify.py —— 用本机已装的 bleak 真正识别 BLE 设备
+
+【为什么写它】主代理只会扫广播名（拿不到厂商/型号）。bleak 已在 Python 3.12 里，
+可以真连接读 GATT —— 尤其 0x180A Device Information 能直接给出制造商/型号/固件版本。
+
+【两阶段】
+  阶段1 扫描：拿完整广播（local_name / manufacturer_data / service_uuids / service_data）
+              —— 广播里的厂商 ID 本身就是最强线索
+  阶段2 连接：逐个连（每个 8-10s 超时），枚举 GATT 服务/特征，读 0x180A
+
+【纪律】
+  · 只读：不写任何 characteristic，不配对，不改设备状态
+  · 连不上就跳过并记原因，不卡住、不硬试
+  · 认不出就写"认不出"，绝不因为广播名有字母就猜品牌
+
+【用法】
+  py -3.12 ble_identify.py           两阶段都跑
+  py -3.12 ble_identify.py --scan    只扫描
+  py -3.12 ble_identify.py --gatt    只连接（用上次扫描结果）
+"""
 import asyncio
 import json
 import os
@@ -9,7 +30,7 @@ import fairy_root
 OUT = fairy_root.log("ble_identify.json")
 SCAN_CACHE = fairy_root.log("ble_scan_raw.json")
 
-
+# 蓝牙 SIG 常见厂商 ID
 COMPANY = {
     0x004C: "Apple", 0x0006: "Microsoft", 0x0075: "Samsung", 0x0157: "Xiaomi",
     0x027D: "Huawei", 0x0087: "Garmin", 0x00E0: "Google", 0x0059: "Nordic",
@@ -19,7 +40,7 @@ COMPANY = {
     0x00D2: "Bose", 0x00E7: "Sony", 0x017E: "JBL", 0x0310: "Xiaomi",
     0x0700: "Huawei", 0x0A0C: "Huawei", 0x027D0: "Huawei",
 }
-
+# 标准 GATT 服务名
 SVC = {
     "00001800": "Generic Access(通用访问)",
     "00001801": "Generic Attribute(通用属性)",
@@ -51,6 +72,7 @@ CHARS = {
     "00002a00": "Device Name(设备名)",
 }
 
+
 def svc_name(uuid):
     k = str(uuid).lower().replace("-", "")[:8]
     full = str(uuid).lower().replace("-", "")
@@ -64,12 +86,21 @@ def svc_name(uuid):
         return "蓝牙 SIG 自定义(%s)" % k
     return "未知厂商私有(%s)" % k
 
+
 def char_name(uuid):
     full = str(uuid).lower().replace("-", "")
     k = full[:8]
     return CHARS.get(full) or CHARS.get(k) or ""
 
+
 def _atomic_json(path, obj, tag=""):
+    """原子写 JSON：先写 .tmp 再 os.replace。
+
+    ★ 为什么要原子：这个模块承诺"每连一台就增量保存"（长任务中途被杀也不全丢），
+      但原来直接 `open(path,"w")` 覆盖 —— 写到一半被杀 = **连之前的也一起没了**，
+      与承诺自相矛盾。而且增量保存那处还包了 `except: pass`，写失败根本不知道。
+      失败必须打印。
+    """
     try:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -79,6 +110,7 @@ def _atomic_json(path, obj, tag=""):
     except Exception as e:
         print("   [warn] 写 %s 失败%s: %s" % (path, ("（" + tag + "）") if tag else "", e), flush=True)
         return False
+
 
 async def scan(sec=10):
     from bleak import BleakScanner
@@ -111,6 +143,7 @@ async def scan(sec=10):
               % (r["address"], r["rssi"], (r["name"] or "(无名)")[:24], names, svcs[:60]))
     return rows
 
+
 async def gatt(rows):
     from bleak import BleakClient
     print("\n[阶段2] 逐个连接读 GATT（只读，不写）", flush=True)
@@ -141,7 +174,7 @@ async def gatt(rows):
                                 val = "<读失败:%s>" % str(e)[:24]
                         chars.append({"uuid": str(c.uuid), "name": cn,
                                       "props": list(c.properties), "value": val})
-
+                        # 0x180A 的字段收进 device_info
                         if str(s.uuid).lower().startswith("0000180a") and cn and val:
                             rec["device_info"][cn] = val
                     svcs.append({"uuid": str(s.uuid), "name": sn, "chars": chars})
@@ -150,7 +183,7 @@ async def gatt(rows):
             rec["error"] = "%s: %s" % (type(e).__name__, str(e)[:120])
         rec["elapsed"] = round(time.time() - t0, 1)
 
-
+        # ---- 判定 ----
         if rec["device_info"]:
             rec["verdict"] = "设备信息: " + "; ".join("%s=%s" % (k, v) for k, v in rec["device_info"].items())
             rec["confidence"] = "high"
@@ -174,12 +207,13 @@ async def gatt(rows):
               % (addr, "连上" if rec["connect"] else "连不上", rec["verdict"][:70],
                  rec["confidence"], rec["elapsed"]), flush=True)
         out.append(rec)
-
-
+        # 【增量保存】每台都写一次 —— 长任务中途被杀也不会全丢（这是第一版的设计缺陷）
+        # 现在用原子写：写一半被杀只毁 .tmp，OUT 里始终是上一台完整结果
         _atomic_json(OUT, out, "增量保存 %s" % addr)
     _atomic_json(OUT, out, "最终结果")
     print("\n结果已写 %s" % OUT)
     return out
+
 
 async def main():
     rows = None
@@ -190,6 +224,7 @@ async def main():
     if rows is None:
         rows = json.load(open(SCAN_CACHE, encoding="utf-8"))
     await gatt(rows)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

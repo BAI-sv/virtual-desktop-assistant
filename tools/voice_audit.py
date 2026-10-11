@@ -1,4 +1,24 @@
 # -*- coding: utf-8 -*-
+"""
+voice_audit.py —— 语音路由审计：从球的日志里统计【每句话走了哪条路】
+
+【为什么需要】
+  目标：虚拟桌面助手 的所有语音输出都必须是"游戏里 Fairy 的音色"。
+  球的日志里藏着可靠的判据（实测确认，2026-10-09）：
+      播放 <16位hex>.wav      -> GAME ORIGINAL  游戏原声（最好）
+      播放 fairy_say.wav      -> CLONE          用 fairy.wav 克隆（好）
+      播放 fairy_say.mp3      -> EDGE           通用音色 ★必须为 0★
+      [fairy] 语音=克隆路由(indextts-clone) N 字节 -> 克隆生成成功
+  ⚠ 千万别只搜 'edge' 关键字 —— 球的日志里根本不写 edge 这个词，
+    它只体现在【文件扩展名 .mp3】上。（这是我 2026-10-09 犯过的错：
+    搜 edge 得到 0，就以为没问题，其实 mp3 出现了 7 次。）
+
+【用法】
+  py -3.12 D:\\FAIRY\\tools\\voice_audit.py                    审计默认日志
+  py -3.12 D:\\FAIRY\\tools\\voice_audit.py <logfile>          审计指定日志
+  py -3.12 D:\\FAIRY\\tools\\voice_audit.py --tail 200          只看最近 200 行
+  py -3.12 D:\\FAIRY\\tools\\voice_audit.py --watch 60          监控 60 秒（每 10 秒刷新）
+"""
 import os
 import re
 import sys
@@ -16,13 +36,25 @@ RE_CLONE = re.compile(r"播放 fairy_say\.wav")
 RE_EDGE = re.compile(r"播放 fairy_say\.mp3")
 RE_GEN = re.compile(r"语音=克隆路由\(indextts-clone\)")
 RE_VOICE = re.compile(r"语音=")
-
-
+# ★【2026-10-09 加】本地克隆【预合成缓存】—— voice_cache.py 的产物，命名 cache_<16hex>.wav
+#   为什么必须单独统计：缓存命中播的也是克隆音色（好），但它不是"游戏原声"，
+#   混在一起会看不出缓存有没有真正被用上。
+#   也正因为带 cache_ 前缀，它【不会】被上面的 RE_ORIG 误匹配（RE_ORIG 前面要求是空格）。
 RE_CACHE = re.compile(r"播放 cache_([0-9a-f]{16})\.wav")
-
+# 兜底路径（克隆不可用时改播一句游戏原声，见 fairy_ball.py 的 corpus.fallback）
 RE_FB = re.compile(r"语音=原声兜底")
 
+
 def _ball_plays_original():
+    """★ 读球的 PLAY_GAME_ORIGINAL 开关。
+
+    【为什么要有这个】用户 2026-10-09 要求「先取消和游戏的关联」，球里设了
+        PLAY_GAME_ORIGINAL = False
+    它【同时关闭】了「原声直出」和「原声兜底」两层 —— 于是
+        GAME ORIGINAL 与 ORIG fallback 会【恒为 0】。
+    那是【预期行为，不是 bug】。不标注出来，以后看到 ORIG=0 一定有人以为坏了。
+    返回 True / False / None（读不到）
+    """
     try:
         with open(os.path.join(fairy_root.TOOLS, "fairy_ball.py"), encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -32,6 +64,7 @@ def _ball_plays_original():
     except Exception:
         pass
     return None
+
 
 def audit(path, tail=0):
     if not os.path.exists(path):
@@ -63,6 +96,7 @@ def audit(path, tail=0):
         "clone_pct": (100.0 * (orig + clone + cache) / total) if total else 0.0,
     }
 
+
 def show(r):
     if r is None:
         return
@@ -78,7 +112,7 @@ def show(r):
     allsum = r["original"] + r["cache"] + r["clone_file"] + r["edge"]
     if allsum != r["total_played"]:
         print("    !! category sum %d != total %d (a route is not counted)" % (allsum, r["total_played"]))
-
+    # ★ 已停用层的标注（从 fairy_ball.py 读开关，不写死）
     po = _ball_plays_original()
     if po is False:
         print("    ⚠ 已停用（球的 PLAY_GAME_ORIGINAL=False）：原声直出 / 原声兜底")
@@ -120,6 +154,7 @@ def main():
         for p in LOGS:
             print("    %s  %s" % (p, "exists" if os.path.exists(p) else "missing"))
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

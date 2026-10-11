@@ -1,4 +1,25 @@
 # -*- coding: utf-8 -*-
+"""
+build_line_pools.py —— 从语料库【机械】构建"执行提示"的台词池
+
+【为什么要它】2026-10-09 用户抱怨："一直都是提示音用的解析进度50%，有没有其他的，
+  不是有 1600 条语音，全都匹配了吗？"
+  实测根因：`fairy_ball.py` 的 GAME_LINE 把 **84 个工具压到只 13 句**台词，其中
+  `run_python`/`run_node` 共用「通信结构解析进度50」—— 主代理整天跑 Python，
+  用户就一直听同一句。**素材利用率 13/1600 = 0.8%**。
+
+【产物】`D:/FAIRY/voice/line_pools.json`
+  {"built":..,"count":370,"pools":{"search":[..],"scan":[..], ...}}
+  · 每句都来自语料库，且【音频文件确实存在】（本脚本校验，缺文件的不收）
+  · 两遍筛：① 严格（以状态/工作词【开头】）② 不够 MIN_POOL 的池用宽松筛补足
+  · 仍不足 MIN_POOL 的池 → 并入 other
+  · 池名固定，供 fairy_ball.py 的 TOOL_POOL 映射
+
+【为什么用 Python 不用 CNSH】本脚本要读 JSON、遍历 1600 条、校验文件存在、写文件 ——
+  **CNSH 没有文件/JSON 能力**，属于必须留在 Python 的那类（见记忆里的 CNSH 边界）。
+
+用法: py -3.12 build_line_pools.py [--dry]
+"""
 import collections
 import json
 import os
@@ -12,7 +33,7 @@ OUT = fairy_root.LINE_POOLS
 MIN_POOL = 12
 MIN_LEN, MAX_LEN = 5, 20
 
-
+# ── 池规则：按【从上到下】取第一个命中的池（顺序会影响归类，别乱调） ──
 RULES = [
     ("search", r"检索|搜索|查找|搜寻|寻找|定位|追踪|侦察"),
     ("read",   r"读取|采集|获取|接收|收录|识别|记录"),
@@ -25,7 +46,7 @@ RULES = [
     ("done",   r"完成|就绪|完毕|成功|搞定|好了|启动完"),
 ]
 
-
+# 第一遍（严格）：必须【以】状态词/工作动词开头 —— 这种最像"执行提示"
 PREFIX_STRICT = (
     r"^(正在|已|检测到|探测到|发现|定位|识别|确认|当前|本次|系统|数据|信号|任务|进度|请|注意|警告|"
     r"开始|启动|完成|就绪|准备|需要|建议|为您|了解|收到|明白|主人请注意|主人请您|主人我|主人您|主人已|"
@@ -33,11 +54,12 @@ PREFIX_STRICT = (
     r"检索|搜索|查找|搜寻|寻找|追踪|侦察|读取|采集|获取|接收|收录|记录|录入|"
     r"规划|计算|分析|推算|路线|路径|方案|部署|安排|通讯|通信|连接|设备|程序|信息|资源|网络|工作)"
 )
-
+# 第二遍（宽松）：句中【任意位置】出现状态词即可（用来把池补足到 MIN_POOL）
 STATUS_ANY = (r"正在|已经|已为|已成功|已确认|已完成|公告|当前|本次|请稍|请注意|警告|检测到|"
               r"探测到|发现|定位|识别|完成|就绪|启动|同步|更新|清理|修复|采集|读取")
-
+# 明显是【剧情对白】而不是提示的，排除（宽松筛时用，避免"…表示…""我认为…"这类）
 NARRATIVE = r"表示|认为|觉得|告诉|问道|回答|因为|所以|但是|而且|如果|难道|难道说|我们应|我会如同"
+
 
 def build():
     j = json.load(open(VOICE_INDEX, encoding="utf-8"))
@@ -45,8 +67,8 @@ def build():
     vd = j.get("voices_dir") or "voices"
     base = vd if os.path.isabs(vd) else os.path.join(os.path.dirname(VOICE_INDEX), vd)
 
-
-    cand = []
+    # 先收集"所有可用候选"（音频存在 + 长度合规 + 去重）
+    cand = []                       # (t, strict?)
     seen = set()
     n_missing = 0
     for e in lines:
@@ -71,12 +93,12 @@ def build():
     pools = collections.OrderedDict((k, []) for k, _ in RULES)
     pools["other"] = []
 
-
+    # 第一遍：严格
     for t, strict in cand:
         if strict:
             pools[put_of(t)].append(t)
 
-
+    # 第二遍：给不足 MIN_POOL 的池补足（宽松，但要排除剧情对白）
     topped = {}
     for name in list(pools.keys()):
         if name == "other" or len(pools[name]) >= MIN_POOL:
@@ -99,7 +121,7 @@ def build():
         if added:
             topped[name] = len(added)
 
-
+    # 仍不足的池 → 并入 other
     merged = []
     for name in list(pools.keys()):
         if name == "other":
@@ -122,6 +144,7 @@ def build():
         "pools": pools,
     }
 
+
 def main():
     doc = build()
     st = doc["stats"]
@@ -143,6 +166,7 @@ def main():
     os.replace(tmp, OUT)
     print("已写:", OUT, "%.1f KB" % (os.path.getsize(OUT) / 1024))
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

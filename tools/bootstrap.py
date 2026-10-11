@@ -1,4 +1,32 @@
 # -*- coding: utf-8 -*-
+"""
+bootstrap.py —— Fairy 自举 / 自扩展流水线
+
+【用户要求】
+  "安装之后，先扫描设备，然后是软硬件，可扩展，网络等等，然后用相关软件硬件进行扩展，
+   你自己决策和优化"
+
+【我的设计决策（为什么这么排）】
+  这不是"体检"（体检是找问题），这是"**发现能力并补上**"。所以顺序是：
+     先看清有什么（设备/硬件/软件/网络）
+       -> 再看能做什么（可扩展性评估：哪些已装没用、哪些设备能连、哪些口能开）
+         -> 然后**真的去做**（自动扩展：安全动作，全部可回滚/可关闭）
+           -> 最后落成档案 + 交给 Fairy 播报
+
+  阶段之间**尽量并行**（用户要求多任务优先）；单阶段内部失败不影响后续（每步独立 try）。
+  所有"自动扩展"动作都是**可逆的、不改系统关键设置**的。
+
+【产物】
+  D:\\FAIRY\\logs\\inventory.json      完整档案（设备/硬件/软件/网络/能力）
+  D:\\FAIRY\\logs\\bootstrap_report.txt 人话报告
+  D:\\FAIRY\\logs\\bootstrap_state.json 上次运行状态（用于"只报变化"）
+
+【用法】
+  py -3.12 bootstrap.py            完整跑一遍
+  py -3.12 bootstrap.py --quick    跳过慢阶段（设备扫描/网络，用于每次开机）
+  py -3.12 bootstrap.py --dry      只评估不执行自动扩展
+  py -3.12 bootstrap.py --speak    结果让 Fairy 念要点
+"""
 import json
 import os
 import socket
@@ -8,7 +36,8 @@ import threading
 import time
 import fairy_root
 
-
+# ★ 2026-10-10【黑窗】不弹窗常量：0x08000000 = CREATE_NO_WINDOW
+#   （★ 注意 0x00000200 是 CREATE_NEW_PROCESS_GROUP，不是"不显示窗口"，以前记错过）
 CREATE_NO_WINDOW = fairy_root.CREATE_NO_WINDOW
 
 D = fairy_root.ROOT
@@ -20,14 +49,18 @@ STATE = os.path.join(LOG, "bootstrap_state.json")
 DSH = 19387
 
 QUICK = "--quick" in sys.argv
-
-
+# 【首次安装识别】第一次安装做全量扫描与拓展，之后按需调用
+#   --auto（开机任务用）：
+#      没有初始化标记 -> 跑【全量】扫描 + 扩展 -> 成功后写标记
+#      已有标记       -> 立刻退出（不再每次开机扫描）
 AUTO = "--auto" in sys.argv
 FULL = "--full" in sys.argv
 MARKER = fairy_root.log(".initialized")
 
+
 def is_first_run():
     return not os.path.exists(MARKER)
+
 
 def mark_initialized():
     try:
@@ -44,22 +77,31 @@ RESULT = {}
 LOCK = threading.Lock()
 T0 = time.time()
 
+
 def log(s):
     print(s, flush=True)
+
 
 def put(key, val):
     with LOCK:
         RESULT[key] = val
 
 
+# 开机路径（--quick，由任务计划 FairyBootstrap 在登录后 40 秒触发）的总超时上限。
+# ★ 为什么必须收紧：stage2/stage3 全走 ps()，而 PowerShell/WMI 一旦卡住，
+#   调用方给的 60~180 秒会原样生效 → 开机任务跟着卡几分钟（甚至被任务计划的
+#   10 分钟 ExecutionTimeLimit 掐掉，留下一份"半截"的 inventory）。
+#   开机路径统一封顶 30 秒；完整模式（手动跑）才允许更长。
 QUICK_PS_CAP = 30
+
 
 def ps(cmd, t=120, enc="gbk"):
     if QUICK:
         t = min(t, QUICK_PS_CAP)
     try:
-
-
+        # ★ 2026-10-10【黑窗】本脚本【用 pythonw.exe 跑】（计划任务 FairyBootstrap 就是），
+        #   自己没控制台 -> 起 powershell.exe 会新建控制台 -> 每次调用都弹一个
+        #   Windows Terminal 窗口。本文件里有几十处 ps()，不堵住就是连环弹窗。
         r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
                            capture_output=True, timeout=t,
                            creationflags=CREATE_NO_WINDOW)
@@ -71,10 +113,14 @@ def ps(cmd, t=120, enc="gbk"):
         print("   [warn] PowerShell 调用失败: %s" % e, flush=True)
         return ""
 
+
 def phase(n, name):
     log("\n[阶段 %d] %s" % (n, name))
 
 
+# ==========================================================================
+# 阶段 1：设备扫描
+# ==========================================================================
 def stage1_devices():
     phase(1, "设备扫描（BLE + mDNS + SSDP + ARP + 音频）")
     out = {"ble": [], "lan": [], "audio": [], "service": [], "error": ""}
@@ -98,6 +144,9 @@ def stage1_devices():
     put("devices", out)
 
 
+# ==========================================================================
+# 阶段 2：硬件清点
+# ==========================================================================
 def stage2_hardware():
     phase(2, "硬件清点")
     hw = {}
@@ -130,7 +179,7 @@ def stage2_hardware():
         hw["disks"] = json.loads(disk) if disk.strip().startswith(("{", "[")) else []
     except Exception:
         hw["disks"] = []
-
+    # XMP 检测（这是重点：Speed != Configured 就是没开）
     try:
         sp, cc = set(), set()
         for m0 in (hw.get("mem") or []):
@@ -150,14 +199,25 @@ def stage2_hardware():
     put("hardware", hw)
 
 
+# ==========================================================================
+# 阶段 3：软件清点
+# ==========================================================================
 def probe_tools():
+    """【不足1 修复】实际调用探测关键工具 —— 不靠名单匹配。
+
+    返回 {工具名: True/False/None}
+      True  = 确实可用（跑到命令 / 找到特征路径）
+      False = 确实没有
+      None  = 拿不准（探测本身失败，**不编**）
+    每个探测最多 5 秒，失败绝不影响别的。
+    """
     import shutil as _sh
     out = {}
 
     def _run(args, timeout=5):
         try:
-
-
+            # ★ 2026-10-10【黑窗】探测 git/curl/ffmpeg 等全是控制台程序，
+            #   本进程是 pythonw（无控制台）-> 不加这个会一个个弹窗。
             r = subprocess.run(args, capture_output=True, timeout=timeout,
                                creationflags=CREATE_NO_WINDOW)
             return r.returncode
@@ -170,7 +230,7 @@ def probe_tools():
         except Exception:
             return False
 
-
+    # ---- 命令行类：which + 真跑一下 ----
     for name, cmd in (("git", ["git", "--version"]),
                       ("curl", ["curl", "--version"]),
                       ("ffmpeg", ["ffmpeg", "-version"]),
@@ -184,21 +244,22 @@ def probe_tools():
         if not exe:
             out[name] = False
             continue
-        out[name] = (_run(cmd) is not None)
+        out[name] = (_run(cmd) is not None)      # 跑得起来就算可用
 
-
+    # ---- WSL：Windows 功能，要真跑 wsl -l -v / --status ----
+    #     注意 wsl.exe 在 System32，which 通常能找到；但"能跑"要看返回码
     wsl_exe = _sh.which("wsl") or (r"C:\Windows\System32\wsl.exe" if _has(r"C:\Windows\System32\wsl.exe") else None)
     if wsl_exe:
         rc = _run([wsl_exe, "--status"], timeout=5)
         if rc is None:
-            out["WSL"] = None
+            out["WSL"] = None                    # 探测超时/异常 -> 不编
         else:
-
+            # wsl --status 无发行版时也可能非 0；能执行到就算"功能在"
             out["WSL"] = True
     else:
         out["WSL"] = False
 
-
+    # ---- Ollama：便携版不在名单里。三重判据 ----
     oll = None
     if _sh.which("ollama"):
         oll = True
@@ -208,16 +269,16 @@ def probe_tools():
             oll = True
             break
     if oll is None:
-
+        # 再看有没有跑过留下的 pid 文件
         for f in ("ollama.pid",):
             if _has(os.path.join(fairy_root.ROOT, f)):
                 oll = True
                 break
     out["Ollama"] = bool(oll)
 
-
-    for name, dirs in (("GPT-SoVITS", [r"<GPT_SOVITS_ROOT>"]),
-                       ("ComfyUI", [r"<COMFY_ROOT>", r"<COMFY_ROOT>",
+    # ---- 便携目录类：查特征目录（比名字匹配可靠）----
+    for name, dirs in (("GPT-SoVITS", [r"D:\GPT-SoVITS-v2pro"]),
+                       ("ComfyUI", [r"D:\ComfyUI_windows_portable", r"D:\Comfyui-xiao-v2",
                                 fairy_root.NAI_ROOT]),
                        ("DevEco Studio", [r"E:\DevEco Studio", r"C:\Program Files\Huawei\DevEco Studio"]),
                        ("HIP/ROCm", [r"C:\Program Files\AMD\ROCm"]),
@@ -230,6 +291,7 @@ def probe_tools():
         out[name] = any(_has(x) for x in dirs)
 
     return out
+
 
 def stage3_software():
     phase(3, "软件清点")
@@ -244,7 +306,7 @@ def stage3_software():
         log("   已安装程序 %d 个" % len(sw["installed"]))
     except Exception:
         pass
-
+    # 便携/绿色软件（顶层目录）
     try:
         for root in (r"D:\\", r"E:\\"):
             if os.path.isdir(root):
@@ -255,7 +317,7 @@ def stage3_software():
         log("   便携/绿色目录 %d 个" % len(sw["portable"]))
     except Exception:
         pass
-
+    # 值得注意的工具（用户批评我"没好好利用"——这里专门标出来）
     NOTABLE = {
         "HWiNFO": ["hwinfo"], "CPU-Z": ["cpu-z", "cpuz"], "GPU-Z": ["gpu-z", "gpuz"],
         "Ryzen Master SDK": ["ryzenmaster"], "Afterburner": ["afterburner"],
@@ -270,23 +332,28 @@ def stage3_software():
     for nice, kws in NOTABLE.items():
         sw["notable"][nice] = any(k in hay for k in kws)
 
-
+    # 【不足1 修复】光靠名单匹配会误判 —— 实测踩到：
+    #   · Ollama 被判"未装"（它是便携版，不在卸载名单里；但有 ollama.pid / D:\fqdeepseek 数据根）
+    #   · WSL   被判"未装"（它是 Windows 功能，根本不在已安装程序名单里）
+    #   · Docker 同理
+    # 所以对这类工具改成【实际调用探测】：跑命令 / 查路径 / 查特征目录。
+    # 要求：快（每个 5 秒内）、失败不抛异常、拿不准就返回 None（不编）。
     sw["probe"] = probe_tools()
-
+    # 用实际探测结果覆盖名单结论（探测更权威）
     for k, v in sw["probe"].items():
         if v is True:
             sw["notable"][k] = True
         elif v is False and sw["notable"].get(k):
-
+            # 名单说有、实际调不通：保留 True 但记下矛盾（例如装了但不在 PATH）
             pass
     log("   关键工具(名单): " + " · ".join("%s%s" % (k, "✓" if v else "✗") for k, v in sw["notable"].items()))
     pr = sw.get("probe") or {}
     log("   关键工具(实探测): " + " · ".join(
         "%s=%s" % (k, {True: "✓", False: "✗", None: "?"}[v]) for k, v in pr.items()))
-
+    # Python 包
     try:
-
-
+        # ★ 2026-10-10【黑窗】py.exe 是控制台程序；本进程是 pythonw（无控制台）
+        #   -> 不加这个就弹一个 Windows Terminal 出来。
         r = subprocess.run(["py", "-3.12", "-m", "pip", "list", "--disable-pip-version-check"],
                            capture_output=True, text=True, timeout=180, encoding="utf-8",
                            errors="replace", creationflags=CREATE_NO_WINDOW)
@@ -294,7 +361,7 @@ def stage3_software():
         log("   Python 包 %d 个" % len(sw["py_pkgs"]))
     except Exception:
         pass
-
+    # 命令行工具
     import shutil as _sh
     for t in ("git", "curl", "py", "ffmpeg", "7z", "smartctl", "adb", "winget", "choco",
               "scoop", "docker", "wsl", "node", "npm", "java", "dotnet"):
@@ -303,6 +370,9 @@ def stage3_software():
     put("software", sw)
 
 
+# ==========================================================================
+# 阶段 4：网络勘察
+# ==========================================================================
 def stage4_network():
     phase(4, "网络勘察")
     net = {}
@@ -321,7 +391,7 @@ def stage4_network():
         net["dns_ok"] = bool(dns.strip())
     except Exception:
         net["dns_ok"] = None
-
+    # 公网连通（短超时）
     try:
         s = socket.socket()
         s.settimeout(2.5)
@@ -329,7 +399,7 @@ def stage4_network():
         s.close()
     except Exception:
         net["internet"] = None
-
+    # 局域网主机（从网关网段快速扫常用端口）
     hosts = []
     try:
         for i in net.get("ifaces") or []:
@@ -356,6 +426,9 @@ def stage4_network():
     put("network", net)
 
 
+# ==========================================================================
+# 阶段 5：可扩展性评估 ★灵魂
+# ==========================================================================
 def stage5_capability():
     phase(5, "可扩展性评估（能做什么，而不是有什么问题）")
     hw = RESULT.get("hardware") or {}
@@ -368,13 +441,13 @@ def stage5_capability():
         cap.append({"area": area, "can": can, "how": how, "blocked": blocked})
 
     nb = sw.get("notable") or {}
-
+    # —— 语音 ——
     if nb.get("GPT-SoVITS"):
         add("语音克隆", "已装 GPT-SoVITS v2pro，可做更贴近游戏音色的克隆",
             "启动 GPT-SoVITS-v2pro，用 fairy.wav 做参考音；接进 TTS 插件的 provider")
     add("语音输出", "已有 TTS 插件（Edge TTS）+ 1600 条游戏原声语料",
         "原声优先 -> 命不中走 TTS 克隆")
-
+    # —— 设备 ——
     ble = dev.get("ble") or []
     if ble:
         add("蓝牙设备", "扫到 %d 个 BLE 设备，其中 %d 个名字可识别"
@@ -383,24 +456,24 @@ def stage5_capability():
             "需要写 BLE central 模块（库已就绪，未写）")
     audio = dev.get("audio") or []
     if audio:
-        add("音频设备", "有 %d 个音频端点（含<BT_SPEAKER>）" % len(audio), "已接入 bluetooth_audio 适配器")
-
+        add("音频设备", "有 %d 个音频端点（含方糖）" % len(audio), "已接入 bluetooth_audio 适配器")
+    # —— 显示/输入 ——
     add("摄像头", "可接 USB 摄像头做视觉输入", "需要摄像头硬件 + 抓帧组件",
         "本机当前无摄像头")
-
+    # —— 网络 ——
     if net.get("lan_hosts"):
         add("局域网", "局域网发现 %d 个开网页端口的设备" % len(net["lan_hosts"]),
             "可逐个嗅探是什么（HTTP 头/设备指纹）-> 进设备适配层")
     add("远程访问", "已装 TeamViewer / UU远程" if (nb.get("TeamViewer")) else "可装远程工具",
         "让你不在家时也能看到屏幕")
-
+    # —— 计算 ——
     if nb.get("HIP/ROCm"):
         add("GPU 计算", "已装完整 HIP/ROCm SDK", "本地推理/训练可走 ROCm 而不是只靠 DirectML")
     if nb.get("ComfyUI"):
         add("绘图", "已装 ComfyUI（多套）", "已接入 aigc 适配（8188）")
     add("本地大脑", "Ollama + llama-server 可作离线兜底",
         "按需拉起，省显存（当前都停着）")
-
+    # —— 系统/运维 ——
     if nb.get("HWiNFO") or nb.get("CPU-Z"):
         add("硬件监控", "已装 HWiNFO / CPU-Z / GPU-Z",
             "可拿传感器数据做权威体检（比 WMI 全）；HWiNFO 需管理员权限")
@@ -411,11 +484,11 @@ def stage5_capability():
         add("磁盘深度体检", "缺 smartmontools",
             "装它可拿 SMART 原始属性 + 错误日志（能定位 E 盘坏道产生时间）",
             "未装：winget install smartmontools")
-
+    # —— 星闪/鸿蒙 ——
     if nb.get("DevEco Studio"):
         add("星闪/鸿蒙", "已装 DevEco Studio（鸿蒙 IDE）",
             "是接星闪/华为生态的正规入口；比另买开发板更直接")
-
+    # —— 扩展点 ——
     add("设备接入", "适配层已就绪（5 个适配器：nearby/audio/http/serial/nearlink）",
         "新设备 = 写一个 Adapter 子类，接口形状不变")
     add("对外接口", "插件已暴露 HTTP：/api/fairy/meta · say · task",
@@ -429,6 +502,9 @@ def stage5_capability():
     put("capability", cap)
 
 
+# ==========================================================================
+# 阶段 6：自动扩展（安全、可逆、可关闭）
+# ==========================================================================
 def stage6_autoconfigure():
     phase(6, "自动扩展（用相关软硬件真的去做）")
     actions = []
@@ -446,7 +522,7 @@ def stage6_autoconfigure():
             actions.append({"action": name, "result": "失败: %s" % str(e)[:100], "note": note})
             log("   ✗ %s : %s" % (name, str(e)[:80]))
 
-
+    # A) 把发现的设备写进设备清单（给适配层/球用）
     def a_devices():
         p = os.path.join(LOG, "devices_known.json")
         dev = RESULT.get("devices") or {}
@@ -473,7 +549,7 @@ def stage6_autoconfigure():
         return "已记账 %d 台设备" % len(merged)
     do("设备入库", a_devices, "把扫描结果并进 devices_known.json（带出现次数，能看出哪些常在）")
 
-
+    # B) 检查并提示"已装未用"的重器（不擅自启动，只生成待办）
     def b_unused():
         sw = RESULT.get("software") or {}
         nb = sw.get("notable") or {}
@@ -495,7 +571,7 @@ def stage6_autoconfigure():
         return "生成 %s（%d 条方向）" % (os.path.basename(p), len(cap))
     do("扩展待办", b_unused, "把'已装未用'和'可扩展方向'落成 Markdown，供决策")
 
-
+    # C) 硬件风险：若 XMP 开着且有 WHEA 历史 -> 记一条高优先级建议
     def c_risk():
         hw = RESULT.get("hardware") or {}
         hwid = os.path.join(LOG, "hw_watch.json")
@@ -529,6 +605,9 @@ def stage6_autoconfigure():
     put("actions", actions)
 
 
+# ==========================================================================
+# 汇总
+# ==========================================================================
 def summarize():
     hw = RESULT.get("hardware") or {}
     dev = RESULT.get("devices") or {}
@@ -577,47 +656,42 @@ def summarize():
         pass
 
     if SPEAK:
+        # ★ 2026-10-11【同类只播一次】按 area 分组，每组一句；走本地播报链
+        #   （fairy_say.py：IndexTTS 直连，不再依赖 DSH）。
         try:
-            import urllib.request
-            msg = ("自举完成。扫描到 %d 个设备，%d 块磁盘，%d 个可扩展方向。"
-                   % (sum(len(v) for v in dev.values() if isinstance(v, list)),
-                      len(hw.get("disks") or []), len(cap)))
-            req = urllib.request.Request(
-                "http://127.0.0.1:%d/dsh-tts-api/speak" % DSH,
-                data=json.dumps({"text": msg}, ensure_ascii=False).encode("utf-8"),
-                headers={"content-type": "application/json"})
-            j = json.loads(urllib.request.urlopen(req, timeout=90).read().decode("utf-8"))
-            u = j.get("url")
-            if u:
-                full = u if str(u).startswith("http") else ("http://127.0.0.1:%d" % DSH) + u
-                audio = urllib.request.urlopen(full, timeout=90).read()
-                tmp = os.path.join(LOG, "boot_say.mp3")
-                open(tmp, "wb").write(audio)
-                import ctypes
-                mci = ctypes.windll.winmm.mciSendStringW
-                mci("close bsay", None, 0, None)
-                if mci('open "%s" type mpegvideo alias bsay' % tmp, None, 0, None) == 0:
-                    mci("play bsay wait", None, 0, None)
-                    mci("close bsay", None, 0, None)
+            cat = {}
+            for c in cap:
+                cat.setdefault(c.get("area") or "其他", []).append(c.get("can") or "")
+            parts = []
+            for area, cans in cat.items():
+                parts.append("%s：%s" % (area, "、".join(cans[:3])))
+            msg = ("扫描完成。发现 %d 个功能方向。" % len(cap))
+            if parts:
+                msg += " " + "；".join(parts[:6])
+            import subprocess as _sp
+            _sp.Popen([sys.executable, os.path.join(HERE, "fairy_say.py"), "--async", msg],
+                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
     return 0
 
-def main():
 
+def main():
+    # ---- --auto：首次全量，之后静默退出 ----
     if AUTO:
         if not is_first_run():
-
+            # 之后不再自动扫描（按需调用）
             return 0
         log("首次安装：执行【全量】扫描与扩展 …")
-
+        # 全量 = 不跳过设备/网络
         globals()["QUICK"] = False
     log("=" * 64)
     log("Fairy 自举流水线   %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
     log("模式: %s" % ("快速" if QUICK else "完整"))
     log("=" * 64)
-
-
+    # 【多任务优先】阶段 2/3 互不依赖 -> 并行；阶段 1/4 涉及网络 -> 也并行
+    #   阶段 5/6 依赖前面的结果，必须串行收口
     t2 = threading.Thread(target=stage2_hardware)
     t3 = threading.Thread(target=stage3_software)
     t2.start(); t3.start()
@@ -641,6 +715,7 @@ def main():
     elif FULL:
         mark_initialized()
     return rc
+
 
 if __name__ == "__main__":
     sys.exit(main())

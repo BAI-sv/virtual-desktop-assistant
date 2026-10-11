@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+"""
+mic_watch.py —— 麦克风/耳机 插拔实时提示（第 2 层：探测 + 播报）
+
+【用户原话】"我的蓝牙耳机连接了，为什么你没提示和提示音"
+【怎么分层】
+  第 1 层 mic_logic.py = 纯判断（说什么、该不该说）
+  第 2 层 本文件 = 枚举设备、真试开验证、分类、调用 CNSH 判断、落通知
+  ⚠ CNSH 没有字符串操作，所以【设备名分类】在 Python 做，把 kind 码传给 CNSH。
+
+【kind 码】1 板载3.5mm  2 USB   3 蓝牙免提  4 无线接收器  5 阵列  9 回环/镜像  0 未知
+
+【用法】
+  py -3.12 mic_watch.py --run          常驻监听（默认）
+  py -3.12 mic_watch.py --once         只探一次并打印，退出
+  py -3.12 mic_watch.py --selftest      注入假设备，验证 CNSH 判断（不依赖真插拔）
+  py -3.12 mic_watch.py --status-json   输出一行 JSON
+"""
 import argparse
 import importlib.util
 import json
@@ -12,15 +29,17 @@ T = os.path.dirname(os.path.abspath(__file__))
 LOG = fairy_root.WORK_LOGS
 STATE = fairy_root.log("mic_watch.json")
 NOTICE = fairy_root.log("mic_notice.txt")
-POLL_S = 10
-BOOT_GRACE_S = 10
-SAME_DEV_S = 60
+POLL_S = 10          # 多久看一次（名字枚举很快）
+BOOT_GRACE_S = 10    # 启动后多久才开始提示
+SAME_DEV_S = 60      # 同一设备最短提示间隔
 
-
+# 采样率阶梯（记忆里的实测要点：蓝牙免提常只支持 8k/16k）
 SR_LADDER = [16000, None, 48000, 44100, 32000, 8000]
 
 
+# ---------------------------------------------------------------- CNSH 层
 def load_logic():
+    """加载 CNSH 编译产物（纯判断）。失败返回 None，调用方要好降级。"""
     p = os.path.join(T, "mic_logic.py")
     if not os.path.exists(p):
         print("[mic] 找不到 mic_logic.py（这个文件应随项目提供，请检查是否被误删）", flush=True)
@@ -36,12 +55,15 @@ def load_logic():
         return None
 
 
+# ---------------------------------------------------------------- 分类（字符串，Python 做）
 LOOPBACK_KW = ("立体声混音", "Stereo Mix", "Sound Mapper", "主声音捕获", "Nahimic",
                "mirroring", "回环", "Loopback", "主声音驱动程序")
 BT_KW = ("Hands-Free", "Hands Free", "免提", "蓝牙", "Bluetooth", "bthhfenum")
 USB_KW = ("USB", "麦克风阵列", "Array", "Microphone (", "无线", "Wireless", "接收器", "Dongle")
 
+
 def classify(name):
+    """设备名 -> kind 码。这是 CNSH 做不了的字符串活，放 Python。"""
     n = str(name or "")
     for k in LOOPBACK_KW:
         if k.lower() in n.lower():
@@ -57,7 +79,9 @@ def classify(name):
     return 0, "未知"
 
 
+# ---------------------------------------------------------------- 真试开（判断能不能用）
 def probe_open(dev_index, name, verbose=False):
+    """逐个试开 + 采样率阶梯。返回 (能用吗, 用到的采样率, 说明)。"""
     try:
         import sounddevice as sd
     except Exception as e:
@@ -87,7 +111,9 @@ def probe_open(dev_index, name, verbose=False):
             continue
     return False, None, "所有采样率都打不开（试过 %s）" % tried
 
+
 def enum_inputs():
+    """枚举当前输入设备 -> {名字: 索引}。只用名字做快速差异。"""
     try:
         import sounddevice as sd
     except Exception as e:
@@ -105,6 +131,7 @@ def enum_inputs():
     return out
 
 
+# ---------------------------------------------------------------- 状态/通知
 def write_state(obj):
     try:
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
@@ -115,7 +142,9 @@ def write_state(obj):
     except Exception as e:
         print("[mic] 写状态失败: %s: %s" % (type(e).__name__, e), flush=True)
 
+
 def post_notice(text, kind):
+    """球没有可被外部调用的播报接口 -> 落一份通知文件，由球读取后播报。"""
     try:
         os.makedirs(os.path.dirname(NOTICE), exist_ok=True)
         tmp = NOTICE + ".tmp"
@@ -129,14 +158,15 @@ def post_notice(text, kind):
         print("[mic] 写通知失败: %s: %s" % (type(e).__name__, e), flush=True)
 
 
+# ---------------------------------------------------------------- 核心：一次扫描
 class Watcher:
     def __init__(self):
         self.t0 = time.time()
-        self.known = {}
-        self.said = {}
+        self.known = {}          # 名字 -> kind（已知设备）
+        self.said = {}           # 名字 -> 上次提示时间
         self.changes = 0
         self.real_mic = False
-        self.best = None
+        self.best = None         # (名字, kind, 采样率)
         self.mod = load_logic()
 
     def scan(self, deep_when_new=True, verbose=False):
@@ -146,26 +176,26 @@ class Watcher:
         events = []
         now = time.time()
 
-
+        # 1) 先把新出现、名字像"真麦克风"的做深探（1~3 秒，所以只对新的做）
         deep = {}
         if deep_when_new:
             for n in new_names:
                 k, desc = classify(n)
                 if k == 9:
-                    deep[n] = (False, None)
+                    deep[n] = (False, None)      # 回环不试开（省时间）
                     continue
                 ok, sr, why = probe_open(cur[n], n, verbose)
                 deep[n] = (ok, sr)
                 if verbose:
                     print("[mic]   深探 %-44s kind=%d(%s) 能用=%s sr=%s" % (n[:44], k, desc, ok, sr), flush=True)
 
-
+        # 2) 逐个判断该不该提示
         for n in new_names:
             k, desc = classify(n)
             ok, sr = deep.get(n, (False, None))
             self.known[n] = k
             self.changes += 1
-
+            # 只有"真能打开的真麦克风"才算数
             if not ok and k != 9:
                 print("[mic] 新增 %s（%s）但打不开 -> 不提示" % (n[:50], desc), flush=True)
                 continue
@@ -210,13 +240,15 @@ class Watcher:
                      "events": events[-5:], "ts": time.strftime("%Y-%m-%d %H:%M:%S")})
         return events, cur
 
+
 def selftest():
+    """不依赖真插拔：喂假设备列表，验证 CNSH 判断 + 回环保护 + 节流。"""
     m = load_logic()
     if m is None:
         print("✗ 没有 mic_logic.py（这个文件应随项目提供，请检查是否被误删）")
         return 1
     print("用例1：新出现【蓝牙耳机 Hands-Free】")
-    for nm in ("耳机 (<BT_HEADSET> Hands-Free AG Audio)",):
+    for nm in ("耳机 (SANSUI  W68 Hands-Free AG Audio)",):
         k, d = classify(nm)
         ok = m.该不该提示(30, k, 999)
         msg = m.该提示什么(k, True) if ok else "(不该说)"
@@ -227,13 +259,14 @@ def selftest():
         ok = m.该不该提示(30, k, 999)
         print("   %-46s kind=%d(%s) 该说=%s  %s" % (nm[:46], k, d, ok, "✓ 正确拒绝" if not ok else "✗ 危险！会自我对话"))
     print("用例3：拔掉蓝牙耳机（移除事件）")
-    k, _ = classify("耳机 (<BT_HEADSET> Hands-Free AG Audio)")
+    k, _ = classify("耳机 (SANSUI  W68 Hands-Free AG Audio)")
     print("   移除 kind=%d -> %s" % (k, m.该提示什么(k, False)))
     print("用例4：节流与启动保护")
     print("   启动5秒就要说蓝牙  -> 该说=%s（应 False）" % m.该不该提示(5, 3, 999))
     print("   启动30秒但10秒前刚说过 -> 该说=%s（应 False）" % m.该不该提示(30, 3, 10))
     print("   启动30秒、距上次999   -> 该说=%s（应 True）" % m.该不该提示(30, 3, 999))
     return 0
+
 
 def main():
     ap = argparse.ArgumentParser(add_help=True)
@@ -256,7 +289,7 @@ def main():
 
     w = Watcher()
     if a.once:
-
+        # 首次扫描会"把现有设备当基线"，但 --once 的用途是【验证耳机麦克风能不能用】
         cur = enum_inputs()
         print("当前输入设备 %d 个：" % len(cur))
         best = None
@@ -272,9 +305,9 @@ def main():
             print("\n★ 判定：没找到可用的真麦克风（只有回环或都打不开）")
         return 0
 
-
+    # --run
     print("[mic] 开始监听（每 %ds 一次；启动 %ds 内不提示）…" % (POLL_S, BOOT_GRACE_S), flush=True)
-    w.scan(deep_when_new=True, verbose=a.verbose)
+    w.scan(deep_when_new=True, verbose=a.verbose)      # 首次 = 基线
     print("[mic] 基线已建立：%d 个输入设备（本次不提示）" % len(w.known), flush=True)
     t_end = time.time() + max(5, a.seconds)
     while time.time() < t_end:
@@ -284,6 +317,7 @@ def main():
             print("[mic] ★提示: %s   <- %s" % (e["text"], e["name"][:50]), flush=True)
     print("[mic] 退出（本次观测到 %d 次变化）" % w.changes, flush=True)
     return 0
+
 
 if __name__ == "__main__":
     os.makedirs(LOG, exist_ok=True)

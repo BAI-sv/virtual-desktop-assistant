@@ -1,4 +1,40 @@
 # -*- coding: utf-8 -*-
+"""
+voice_cache.py —— Fairy 克隆音色【预合成缓存】
+
+【为什么需要它】
+    用户要求：所有语音输出都必须是【游戏里 Fairy 的音色】。
+    现状痛点：IndexTTS(:9881) 一停，球就退回 Edge 通用中文音色（用户讨厌的那个）。
+    对策：把球的【全部固定话术】用 IndexTTS + 游戏 Fairy 参考音【预先合成好】缓存起来。
+        → 球查缓存命中就直接播，【零延迟、不依赖 IndexTTS 在线】，音色永远是 Fairy。
+        → 只有【动态文本】（含具体数字/文件名的那种）才需要实时调 IndexTTS。
+
+【用法】
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --collect     只盘清单，不合成（先看有多少条）
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --build       合成全部（可断点续跑，已存在的跳过）
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --build --force  强制重合成
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --build-one 文本
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --status      统计
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --verify      抽 10 条校验
+    py -3.12 D:\\FAIRY\\tools\\voice_cache.py --clean       清理零字节/损坏产物
+
+【给球调用的接口】
+    import voice_cache
+    p = voice_cache.lookup("主人请注意")     # 命中返回 wav 路径，未命中返回 None
+    voice_cache.refresh()                    # 索引有变化时重载（球每次查前调一次，很轻）
+
+【缓存格式】
+    D:\\FAIRY\\voice\\clone_cache\\<sha1(文本 utf-8) 前 16 位>.wav
+    D:\\FAIRY\\voice\\clone_cache\\index.json
+        { "<hash>": {"t": 文本, "f": 文件名, "d": 时长秒, "ts": 生成时间戳} }
+    ★ 索引与音频都是【原子写】（先写 .tmp 再 os.replace）
+    ★ 2026-10-10多线程登记已加锁（_INDEX_LOCK，可重入），
+      tmp 文件名带线程 ident + 随机后缀，不再撞名。
+
+【IndexTTS 接口（已实测）】
+    GET  :9881/health  -> {"ok":true,"device":"cuda:0","api":"infer_v2_5","loaded":true}
+    POST :9881/tts     {"text":..,"ref_audio":..,"lang":"zh","emo_alpha":1.0} -> WAV 二进制
+"""
 import argparse
 import glob
 import hashlib
@@ -25,20 +61,40 @@ REF_AUDIO = os.path.join(VOICE_DIR, "index_voices", "fairy.wav")
 TTS_URL = "http://127.0.0.1:9881/tts"
 HEALTH_URL = "http://127.0.0.1:9881/health"
 
-
+# ★ 缓存文件名前缀。为什么必须带前缀（2026-10-09）：
+#   voice_audit.py 用正则 `播放 ([0-9a-f]{16})\.wav` 识别【游戏原声】。
+#   如果缓存文件叫 `<16位hash>.wav`，它【会被错算成游戏原声】，
+#   审计就分不出「原声 vs 克隆缓存」了。加前缀 cache_ 后，
+#   `播放 cache_b874….wav` 不匹配该正则 -> 可单独统计。
 FILE_PREFIX = "cache_"
 
-
+# --------------------------------------------------------------------------
+# ★★【2026-10-09 关键发现】只缓存【语料库里没有的】话术
+#
+#   球的播放顺序是（fairy_ball.py 的 _worker）：
+#       ① corpus.find(text) 命中 -> 直接播【游戏原声】，continue
+#       ② 没命中才查克隆缓存
+#   而 LINE_POOLS 的 380 句 + GAME_LINE 的工具台词【全部是语料库里的原声台词】
+#   -> 它们在【第①步就播成游戏原声了，永远走不到缓存】。
+#   给它们做缓存在纯属浪费（原声本来就是最好的，克隆反而更差）。
+#
+#   实测代价：435 条 × 约 28 秒/条 ≈ 3.4 小时（而真正需要的只有约 60 条）。
+#   -> 所以 all_phrases() 默认【剔除语料库能直出的那些】。
+# --------------------------------------------------------------------------
 VOICE_INDEX = os.path.join(VOICE_DIR, "voice_index.json")
-
+# 与 fairy_ball.py 的 _PUNCT 逐字一致（归一化口径必须相同，否则过滤会漏）
 _PUNCT = ("\u2026\u3002\uff0c\uff01\uff1f\u3001\uff1b\uff1a"
           "\u201c\u201d\u2018\u2019\u300a\u300b\u3010\u3011"
           "()[]{}<>!?,.;:\"'" + "\u3000 \t\n")
 
+
 def _norm(s):
+    """归一化：去掉标点和空白，只留文字（复刻 fairy_ball.py 的 _norm）。"""
     return "".join(ch for ch in str(s or "") if ch not in _PUNCT).strip()
 
+
 def corpus_keys():
+    """语料库里已有的（归一化）文本 —— 这些球会走原声直出，不需要克隆缓存。"""
     try:
         with open(VOICE_INDEX, encoding="utf-8") as f:
             j = json.load(f)
@@ -53,9 +109,21 @@ def corpus_keys():
                 out.add(v)
     return out
 
+
 BALL_FILE = os.path.join(HERE, "fairy_ball.py")
 
+
 def ball_plays_original():
+    """★ 读球的 PLAY_GAME_ORIGINAL 开关（读不到就当 True）。
+
+    【为什么必须读它，而不是写死】
+      用户 2026-10-09 提了「先取消和游戏的关联」，球里加了开关：
+          PLAY_GAME_ORIGINAL = False
+          hit = self.corpus.find(text) if PLAY_GAME_ORIGINAL else None
+      一旦它为 False，【原声直出这层就没了】—— 语料库里那 382 句也会掉到缓存这层，
+      于是【它们必须缓存】。我当初按"球会走原声直出"的旧前提，把 435 条砍成 53 条做，
+      前提一变就全错了。所以改成【自动跟随球的开关】，开关一动这边自动跟着变。
+    """
     try:
         with open(BALL_FILE, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -67,7 +135,9 @@ def ball_plays_original():
         print("[cache] ⚠ 读球开关失败（按 True 处理）: %s: %s" % (type(e).__name__, e), flush=True)
     return True
 
+
 def effective_routes():
+    """球的【实际生效】播放层（按 fakiry_ball.py 的开关算出来，用于审计/报告）。"""
     orig = ball_plays_original()
     return {
         "play_game_original": orig,
@@ -76,7 +146,7 @@ def effective_routes():
         "disabled": ([] if orig else ["原声直出", "原声兜底"]),
     }
 
-
+# 盘清单时要扫的源文件（球的固定话术都在这些里面）
 SCAN_FILES = [
     os.path.join(HERE, "fairy_ball.py"),
     os.path.join(HERE, "fairy_device.py"),
@@ -86,21 +156,24 @@ SCAN_FILES = [
     os.path.join(HERE, "balance_watch.py"),
 ]
 
-
+# 明显不是"要说出口的话"的过滤词
 _BAD_MARK = ("%s", "%d", "%.", "{", "}", "\\", "http", "utf-8", "OK", "Traceback",
              "open(", "print(", "def ", "import ", "sha1", "stdin", "stdout")
 
 
+# --------------------------------------------------------------------------- 工具
 def sha_of(text):
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
+
 def wav_duration(path):
+    """只读 WAV 头算时长，不解码全部（快）。"""
     try:
         with open(path, "rb") as f:
             head = f.read(64)
             if len(head) < 44 or head[:4] != b"RIFF":
                 return 0.0
-
+            # 找 fmt 块拿采样率/声道/位深
             f.seek(12)
             rate = ch = bits = 0
             data_size = 0
@@ -111,8 +184,13 @@ def wav_duration(path):
                 cid, csz = struct.unpack("<4sI", hdr)
                 if cid == b"fmt ":
                     b = f.read(csz)
-
-
+                    # ★ WAV fmt 块布局（16 字节，PCM）：
+                    #     wFormatTag(H2) 声道(H2) 采样率(I4) 字节率(I4) 块对齐(H2) 位深(H2)
+                    #   —— 2026-10-09 我在这里连栽两次，记录一下免得再犯：
+                    #     第一版 "<HHIIH"   : 漏了最后的位深字段，且少读字节
+                    #     第二版 "<HIIHH"   : 完全错位（把 wFormatTag 当成声道），时长算成 0
+                    #   实测样本 bc: 0100 0100 22560000 44ac0000 0200 1000
+                    #                 =1(PCM) 1ch 22050Hz 44100B/s 2 16bit ✓
                     (_fmt, ch, rate, _byterate, _align, bits) = struct.unpack("<HHIIHH", b[:16])
                 elif cid == b"data":
                     data_size = csz
@@ -125,7 +203,16 @@ def wav_duration(path):
         pass
     return 0.0
 
+
 def _atomic_write(path, data, binary=True):
+    """原子写。
+
+    ★ 2026-10-10临时文件名必须【唯一】。
+      原来固定叫 <path>.tmp —— 球的三个线程（worker / fairy-prefetch / fairy-warm）
+      同时登记就会撞同一个 tmp：互相覆盖，严重的还会把 JSON 写坏
+      （实测：12 线程 x 12 条 x 5 轮，每轮只活下来 1 条，共丢 55/60）。
+      现在带线程 ident + 随机后缀，撞名概率可忽略。
+    """
     tmp = "%s.tmp.%d.%08x" % (path, threading.get_ident(), random.getrandbits(32))
     mode = "wb" if binary else "w"
     kw = {} if binary else {"encoding": "utf-8"}
@@ -134,7 +221,7 @@ def _atomic_write(path, data, binary=True):
             f.write(data)
         os.replace(tmp, path)
     except Exception:
-
+        # 失败别留垃圾 tmp（否则下次 --clean 会捡到一堆没人认领的文件）
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -142,7 +229,15 @@ def _atomic_write(path, data, binary=True):
             pass
         raise
 
+
 def load_index():
+    """读索引。
+
+    ★ 2026-10-10原来 except 一律 return {} ——
+      索引一旦被并发写坏，用户那 473 条（约 75MB）会【静默全部看不见】，
+      而且下一次 save_index 就把 {} 覆盖回去 = 真丢。
+      现在：坏文件先【备份】再返回空，并且【大声报警】。
+    """
     try:
         with open(INDEX_FILE, encoding="utf-8") as f:
             return json.load(f)
@@ -162,28 +257,40 @@ def load_index():
               % (type(e).__name__, str(e)[:120], bak or "(备份没成功)", CACHE_DIR), flush=True)
         return {}
 
+
 def save_index(idx):
     os.makedirs(CACHE_DIR, exist_ok=True)
     _atomic_write(INDEX_FILE, json.dumps(idx, ensure_ascii=False, indent=1), binary=False)
 
 
+# ★ 2026-10-10索引读改写锁。
+#   可重入（RLock）：register() 会在锁内调 refresh()，refresh() 自己也要拿锁。
+#   ★ 进程内有效 —— 球是单进程三线程，正好覆盖；跨进程（命令行 --build 撞上球）
+#     靠 _atomic_write 的唯一 tmp 名 + os.replace 保证不会写坏文件。
 _INDEX_LOCK = threading.RLock()
 
 
+# --------------------------------------------------------------------------- 盘清单
 def _looks_speakable(s):
+    """宽松判据（只给旧调用用）。新流程用 _reject_reason 带分类。"""
     return _reject_reason(s) is None
 
 
+# ★ 判据：这句话会被【念出来】吗？会 -> 收；只是 print/注释/异常/路径 -> 排除
+#   —— 2026-10-09 实测教训：用正则抓中文字面量会混进大量日志/文档串，
+#      755 条里大半是噪音，合成它们纯属白烧 GPU（755 条 x 4 秒 ≈ 50 分钟）。
 _LOG_MARK = ("[fairy]", "[advisor]", "[mic]", "[cache]", "[voice]", "[goal]",
              "Traceback", "Errno", "错误:", "失败:", "Exception", "Error:",
              "ModuleNotFound", "FileNotFound", "PermissionError", "warning")
 _PLACE_MARK = ("%s", "%d", "%f", "%(", "%r", "%x", "%X", "%g",
-
-
+               # ★ 2026-10-09 补：原来漏了 %.Nf 这种精度写法，
+               #   结果「紧急提醒：API 余额只剩 %.2f 元了…」被当成成品话术收了进来
                "%.", "% ", "{", "}",
                "format(", "f\"", "f'", "\\.", "\\n")
 
+
 def _reject_reason(s):
+    """返回 None 表示收；否则返回被排除的类别名（用于审计统计）"""
     s = s.strip()
     if not s:
         return "empty"
@@ -206,8 +313,8 @@ def _reject_reason(s):
             return "has_placeholder"
     if s.startswith(("---", "===", ">>>", "#", "//", "/*")):
         return "comment"
-
-
+    # ★【2026-10-09 加】排除【分类标签 / 枚举值】—— 它们不是"要说出口的话"：
+    #   例：关心型 / 说教型 / 鼓励型（fairy_logic 的语气分类）；ok / done / level2（字段值）
     if re.search(r"^.{1,3}(型|类|级)$", s):
         return "category_label"
     if re.fullmatch(r"[A-Za-z0-9_]+", s):
@@ -215,10 +322,18 @@ def _reject_reason(s):
     return None
 
 
+# 会被"念出来"的调用名（球/模块里真正送进扬声器的入口）
 SPEAK_FNS = {"speak", "say", "_bubble", "bubble", "put", "announce",
              "say_text", "speak_text", "tell", "_say", "voice", "speak_async"}
 
+
 def _collect_from_py(path):
+    """★ 用语法树只取【会念出来】的字面量：
+        · 传给 speak/say/_bubble/put 等调用实参里的字符串
+        · 函数 return 出去的字符串（模块把"要说的话"返回给调用方）
+    排除：文档字符串、print/log 实参、注释（AST 里根本没有注释）
+    返回 (speak_args:set, returned:set)
+    """
     import ast
     try:
         src = open(path, encoding="utf-8", errors="replace").read()
@@ -270,7 +385,9 @@ def _collect_from_py(path):
             _grab(returned, node.value)
     return speak_args, returned
 
+
 def collect_strict():
+    """严格收集。返回 (final:set, stats:dict, by_source:dict)"""
     stats = {"raw": 0, "kept": 0}
     by_src = {}
     drops = {}
@@ -282,8 +399,8 @@ def collect_strict():
             r = _reject_reason(s)
             if r:
                 drops[r] = drops.get(r, 0) + 1
-
-
+                # ★ 含占位符的是"模板"（如 你不在（已空闲 %d 分钟））——
+                #   合成带具体数字的废音频没意义，但记下来便于以后回看
                 if r == "has_placeholder":
                     templates.add(s.strip())
                 continue
@@ -296,7 +413,7 @@ def collect_strict():
 
     final = set()
 
-
+    # ① 台词池（最干净，全收）
     pools = set()
     try:
         with open(POOLS_FILE, encoding="utf-8") as f:
@@ -307,7 +424,7 @@ def collect_strict():
         print("[cache] 读线池失败: %s: %s" % (type(e).__name__, e), flush=True)
     _add(final, pools, "line_pools")
 
-
+    # ② 代码里会念出来的字面量
     for p in SCAN_FILES:
         if not os.path.exists(p):
             continue
@@ -321,7 +438,9 @@ def collect_strict():
     stats["templates"] = sorted(templates)
     return final, stats, by_src
 
+
 def collect_phrases(verbose=True):
+    """兼容旧接口：返回 {类别: set}"""
     src = {}
     pools = set()
     try:
@@ -346,7 +465,20 @@ def collect_phrases(verbose=True):
         print("   %-16s %4d 条（去重后）" % ("合计", len(total)))
     return src
 
+
 def all_phrases(mode=None):
+    """返回"需要合成缓存"的话术集合。
+
+    mode:
+        None（默认）【自动跟随球的开关 PLAY_GAME_ORIGINAL】：
+              球播原声 -> 语料库能直出的不用缓存
+              球不播原声 -> 语料库那批【也必须缓存】
+        needed   等价于 original（保留旧名字，兼容旧调用）
+        all      全部固定话术
+        corpus   只留语料库能直出的（审计对照用）
+        unlinked 强制"球不播原声"模式
+        original 强制"球播原声"模式
+    """
     final, _stats, _by = collect_strict()
     ck = corpus_keys()
     if ck is None:
@@ -359,9 +491,10 @@ def all_phrases(mode=None):
         return {s for s in final if _norm(s) in ck}
     if mode in ("needed", "original"):
         return {s for s in final if _norm(s) not in ck}
-    return final
+    return final          # unlinked / 其它：全都要
 
 
+# --------------------------------------------------------------------------- 合成
 def health(timeout=6):
     try:
         with urllib.request.urlopen(HEALTH_URL, timeout=timeout) as r:
@@ -369,7 +502,14 @@ def health(timeout=6):
     except Exception as e:
         return {"ok": False, "why": "%s: %s" % (type(e).__name__, str(e)[:80])}
 
+
 def synth(text, timeout=90):
+    """调 IndexTTS，返回 WAV bytes；失败抛异常。
+
+    ★ timeout 必须有（2026-10-09 事故）：批量跑到一半时某一条请求把服务卡死，
+      进程在那儿无限等待 —— 整个批次卡了 11 分钟没有任何进展。
+      加上超时后，卡住的条目会被记为失败并继续跑后面的。
+    """
     body = json.dumps({"text": text, "ref_audio": REF_AUDIO, "lang": "zh",
                        "emo_alpha": 1.0}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(TTS_URL, data=body,
@@ -380,7 +520,9 @@ def synth(text, timeout=90):
         raise ValueError("返回不是有效 WAV（%d 字节，头=%r）" % (len(b), b[:8]))
     return b
 
+
 def warmup(rounds=1):
+    """首次调用很慢（模型加载）—— 先预热，避免第一条被当成超时"""
     t0 = time.time()
     for i in range(rounds):
         try:
@@ -393,6 +535,7 @@ def warmup(rounds=1):
     return False
 
 
+# --------------------------------------------------------------------------- 构建
 def build(force=False, limit=None):
     os.makedirs(CACHE_DIR, exist_ok=True)
     h = health()
@@ -431,7 +574,7 @@ def build(force=False, limit=None):
     t_all = time.time()
     for n, (s, hs, f) in enumerate(todo, 1):
         got = None
-        for attempt in range(3):
+        for attempt in range(3):           # 首次 + 2 次重试
             try:
                 got = synth(s)
                 break
@@ -462,23 +605,32 @@ def build(force=False, limit=None):
     return 0
 
 
+# --------------------------------------------------------------------------- 查询（给球用）
 _MEM = {"mtime": 0.0, "size": -1, "idx": {}}
 
+
 def _index_sig():
+    """(mtime, size) —— ★ 只用 mtime 会漏：Windows 的 mtime 精度是 100ns，
+    但同一毫秒内多次写入经常拿到【同一个】mtime 字符串 -> refresh 以为"没变"
+    -> 内存里一直是旧索引（实测：32 条全在磁盘上，refresh 后内存读到 0 条）。"""
     st = os.stat(INDEX_FILE)
     return (st.st_mtime, st.st_size)
 
+
 def refresh():
+    """索引文件有变化才重载（球每次查前调一次，开销≈一次 stat）"""
     try:
         sig = _index_sig()
     except OSError:
         return
     if sig != (_MEM["mtime"], _MEM["size"]):
-        with _INDEX_LOCK:
+        with _INDEX_LOCK:              # ★ #4：和 register() 的"重读+写回"串行，别互相看见半截
             _MEM["idx"] = load_index()
             _MEM["mtime"], _MEM["size"] = sig
 
+
 def lookup(text):
+    """命中返回 wav 绝对路径；未命中 None。★ 很轻：内存字典 + 一次 os.path.exists"""
     if not text:
         return None
     refresh()
@@ -488,11 +640,20 @@ def lookup(text):
     p = os.path.join(CACHE_DIR, e.get("f") or "")
     return p if os.path.exists(p) else None
 
+
 def register(text, src_path):
+    """★ 2026-10-10 新增：把【刚合成出来的一句】登记进预合成缓存（球在合成后顺手调）。
+
+    【为什么要它】开机播报里"现在天气/未来三天/穿衣建议"每天都变，永远命不中缓存，
+    每次开机都要**实时合成 3~4 秒**；用户抱怨的"间隔太长"有一半出在这里。
+    合成完顺手存一份，第二天同一句（比如"现在室外 30 度，体感 28 度…"重复出现时）
+    就能秒出。存不下或登记失败都**不影响播放**，所以这里只报错不抛。
+    返回入库后的路径；没入库（太小/读不到）返回 None。
+    """
     try:
         if not text or not src_path or not os.path.exists(src_path):
             return None
-        if os.path.getsize(src_path) < 2000:
+        if os.path.getsize(src_path) < 2000:          # 太短的多半是坏产物，不污染索引
             return None
         ext = ".mp3" if str(src_path).lower().endswith(".mp3") else ".wav"
         hs = sha_of(text.strip())
@@ -504,21 +665,25 @@ def register(text, src_path):
         with open(src_path, "rb") as f:
             data = f.read()
         _atomic_write(dst, data, binary=True)
-
-
+        # ★ 2026-10-10load+save 必须串行：
+        #   三个线程（worker / fairy-prefetch / fairy-warm）同时登记时，
+        #   各自"读旧索引 -> 改自己那条 -> 整体写回"，后写的会把先写的覆盖掉。
+        #   实测 12 线程 x 12 条 x 5 轮：每轮只活下来 1 条，共丢 55/60。
+        #   加锁后全部活下来（验证见 reviewfix_verify.py 的并发压测）。
         with _INDEX_LOCK:
-            idx = load_index()
+            idx = load_index()                # ★ 锁内重读：拿的必须是最新一份
             idx[hs] = {"t": str(text).strip(), "f": name,
                        "d": round(wav_duration(dst), 3) if ext == ".wav" else 0,
                        "ts": int(time.time())}
             save_index(idx)
-            refresh()
+            refresh()                         # ★ 立刻让本次进程内的 lookup 也能命中
         return dst
     except Exception as e:
         print("[cache] 登记失败(不影响播放): %s: %s" % (type(e).__name__, e), flush=True)
         return None
 
 
+# --------------------------------------------------------------------------- 其它命令
 def cmd_status():
     idx = load_index()
     files = glob.glob(os.path.join(CACHE_DIR, "*.wav"))
@@ -543,6 +708,7 @@ def cmd_status():
         for z in zero[:10]:
             print("      %s  %d B" % (os.path.basename(z), os.path.getsize(z)))
     return 0
+
 
 def cmd_verify(sample=10):
     import random
@@ -570,7 +736,15 @@ def cmd_verify(sample=10):
                                           min(sample, len(keys)), bad))
     return 0 if bad == 0 else 1
 
+
 def cmd_clean(dry=False):
+    """清理坏记录与孤儿文件。
+
+    ★【2026-10-09 事故后加的保险】我加 cache_ 前缀时忘了同步改孤儿判断，
+      结果 54 个文件（含 21 个有效缓存）被一次性全删 ✗。
+      现在：如果"要删的数量超过总文件数的一半"，就【拒绝执行】并打印待删清单，
+      让人先看一眼 —— 因为这种比例几乎一定是判断逻辑写错了，不是真的都是孤儿。
+    """
     idx = load_index()
     files = glob.glob(os.path.join(CACHE_DIR, "*.wav"))
     bad_records = []
@@ -590,6 +764,7 @@ def cmd_clean(dry=False):
           % (len(files), len(orphan_files), len(bad_records), will_del))
 
     def _list_them(names):
+        """列出【前 20 + 后 20】文件名 —— 只报数量看不出误判模式。"""
         n = len(names)
         head = names[:20]
         tail = names[-20:] if n > 20 else []
@@ -625,10 +800,11 @@ def cmd_clean(dry=False):
         removed += 1
     for f in orphan_files:
         os.remove(f)
-    with _INDEX_LOCK:
+    with _INDEX_LOCK:                      # ★ #4：读改写串行
         save_index(idx)
     print("[clean] 清掉 %d 条坏记录 + %d 个孤儿文件" % (removed, len(orphan_files)))
     return 0
+
 
 def cmd_collect():
     print("── 固定话术清单（严格）────────────────")
@@ -643,7 +819,9 @@ def cmd_collect():
     print("   已写出 -> %s" % out)
     return 0
 
+
 def cmd_audit(sample=30):
+    """★ 清单审计报告（合成前先给人看）"""
     import random
     final, stats, by_src = collect_strict()
     print("=" * 62)
@@ -674,7 +852,7 @@ def cmd_audit(sample=30):
     print("  按来源分类：")
     for k, v in sorted(by_src.items(), key=lambda x: -x[1]):
         print("      %-18s %4d 条" % (k, v))
-
+    # ★ 球的实际播放层 + 需要缓存多少条（关键：读球的 PLAY_GAME_ORIGINAL 自动判断）
     rt = effective_routes()
     print("")
     print("  ★ 球当前的播放层（读 fairy_ball.py 的 PLAY_GAME_ORIGINAL）：")
@@ -731,9 +909,22 @@ def cmd_audit(sample=30):
           % (os.path.join(CACHE_DIR, "phrases.txt"), len(final), len(tmpl)))
     return 0
 
+
 def cmd_suspect():
+    """★ 把"疑似 ASR 转写残次品/语义不通"的话术挑出来【单独列表】。
 
-
+    【按主代理 2026-10-09 的要求】
+      · 只【标记】，不从合成里剔除（它们在球的话术池里，球就可能念到）
+      · 输出 phrases_suspect.txt，供以后人工筛
+    判据（启发式，宁可多标不要漏标）：
+      · 长度异常（>22 字，Fairy 的台词通常很短）
+      · 含游戏专有名词/生僻搭配（人工小词表）
+      · 含连续 3 个以上拉丁字母（中文台词里出现英文长串通常是转写问题）
+      · 含罗马数字后缀（II / III）
+    """
+    # ★ 判据收紧记录（2026-10-09）：第一版把「以太」「邦布」「鸣徽」等游戏正经术语
+    #   也当成残次品，还把 "Fairy愿竭尽全力支持您独立完成" 因为含英文被判异常 —— 误报太多。
+    #   现在只留【人工确认为语义不通】的搭配 + 极长行 + 连续数字。
     SUSPECT_WORDS = ("元首", "身材优势", "抓物机", "言如句", "沙牙部", "太底",
                      "多佩冈亚", "法布提", "Random Play")
     final, stats, by = collect_strict()
@@ -766,10 +957,12 @@ def cmd_suspect():
         print("      %-30s | %s" % (s[:30], w))
     return 0
 
+
 def cmd_export(n=3, dest=None):
+    """★ 导出 n 条缓存音频供人试听（主代理要求：不要播放）"""
     dest = dest or os.path.join(os.path.dirname(os.path.dirname(HERE)), "logs",
                                 "voice_unified")
-
+    # 更稳的默认：和球的日志同目录
     dest = os.path.join(fairy_root.WORK_LOGS, "voice_unified")
     os.makedirs(dest, exist_ok=True)
     idx = load_index()
@@ -790,6 +983,7 @@ def cmd_export(n=3, dest=None):
     if not made:
         print("   （缓存里还没有文件）")
     return 0
+
 
 def main():
     ap = argparse.ArgumentParser(add_help=True)
@@ -826,7 +1020,7 @@ def main():
         idx = load_index()
         idx[hs] = {"t": s, "f": FILE_PREFIX + hs + ".wav",
                    "d": round(wav_duration(f), 3), "ts": int(time.time())}
-        with _INDEX_LOCK:
+        with _INDEX_LOCK:                  # ★ #4：读改写串行
             save_index(idx)
         print("[cache] 已合成 %s -> %s（%.1f KB，%.2fs）"
               % (s[:24], f, os.path.getsize(f) / 1024.0, wav_duration(f)))
@@ -843,6 +1037,7 @@ def main():
         return cmd_export(a.export or 3)
     print(__doc__)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

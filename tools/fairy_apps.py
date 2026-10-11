@@ -1,4 +1,22 @@
 # -*- coding: utf-8 -*-
+"""
+fairy_apps.py —— FairyX 全类别工具调度中心
+==========================================
+用户说"给我写个代码 / 下载XXX / 看视频"时：
+  1) 按类别匹配工具（代码/文档/播放器/下载器...）
+  2) 已装 → 直接调用；没装 → 官方直链下载 → 静默安装
+  3) 启动工具完成任务
+
+安全原则：只从官方域名下载；只自动安装"免费 + 支持静默"的软件；
+大型软件（如 DevEco 1GB+）只检测+提示下载，不自动装。
+
+用法：
+  py -3.12 tools\fairy_apps.py --list           列出全部可调度工具
+  py -3.12 tools\fairy_apps.py --find 写代码    按类别找工具（返回已装/未装）
+  py -3.12 tools\fairy_apps.py --install vscode 自动下载安装 VS Code
+  py -3.12 tools\fairy_apps.py --open vscode    打开工具
+  py -3.12 tools\fairy_apps.py --write "D:/x/demo.py" "print('hi')" 写文件并用IDE打开
+"""
 import argparse
 import json
 import os
@@ -8,12 +26,17 @@ import sys
 import time
 import urllib.request
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）。
+#   父进程没控制台时（pythonw / 计划任务），不加这个起安装器就弹终端。
 CREATE_NO_WINDOW = 0x08000000
 
+# ---------------- 使用人授权 ----------------
+# config.json 的 consent 段：scan/install/system_change 三项，默认 false
+# 未授权 → 扫描/发现/安装/更改一律拒绝，返回引导提示。
 
 def _cfg_path():
     return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json"))
+
 
 def _cfg():
     try:
@@ -23,24 +46,31 @@ def _cfg():
         return {}
 
 
+# FairyX 根目录：由脚本位置推导（tools/ 的上一级）
 D = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _cpaths = _cfg().get("paths") or {}
 
+
 def consent_ok(kind):
+    """检查某项授权是否已获得"""
     try:
         with open(_cfg_path(), encoding="utf-8") as f:
             return bool(json.load(f).get("consent", {}).get(kind, False))
     except Exception:
         return False
 
+
 def require_consent(kind, action_desc):
+    """未授权时返回引导文案（None=已授权，可继续）"""
     if consent_ok(kind):
         return None
     return ("需要使用人授权后才能%s。\n"
             "请在 FairyX 启动时同意授权弹窗，或手动编辑 config.json 的 "
             "consent 段把 %s 改为 true。" % (action_desc, kind))
 
-
+# ---------------- 工具目录（类别 -> 工具列表） ----------------
+# key: 工具唯一名；cat: 类别；strong: 强特征词（命中即首选，如语言/平台名）；
+# win: 通用词（兜底匹配）；exe: 检测/启动路径；url: 官方下载直链；silent: 静默参数；home: 官网
 APP_CATALOG = {
     "vscode": dict(cat="代码", strong=["visual studio code", "vs code", "vscode", "python", "javascript", "js", "html", "web", "node", "typescript"],
                    win=["写代码", "编程", "ide", "编辑器", "代码编辑器"],
@@ -97,11 +127,15 @@ APP_CATALOG = {
                    url=None, silent=[], home="https://ollama.com"),
 }
 
-
+# 类别 -> 默认首选工具（用户只说类别时用）
 CAT_DEFAULT = {"代码": "vscode", "文档": "wps", "下载": "aria2",
                "搜索": "everything", "AI": "ollama"}
 
+# ---------------- 全软件大分类体系（扫描自动归类 + 缺类代表预装） ----------------
+# 分类名 -> {工具名: 可下载安装的官方直链 或 None(检测/手动)}
+# 已装检测复用 APP_CATALOG 的 exe；"代表"即该类最值得预装的免费软件
 
+# 常用优先类（视频/下载/文档/音乐/上网等高频，优先询问预装）
 PRIORITY_CATS = ["媒体播放", "下载工具", "办公文档", "音乐", "浏览器",
                  "即时通讯", "阅读器", "压缩解压"]
 
@@ -134,7 +168,7 @@ CATEGORIES = {
     "云盘同步": {"baidu": None},
 }
 
-
+# 每类代表软件的可下载源（官方直链，免费）—— 只有小而静默的填 url，大软件留 None 提示官网
 REP_SOURCES = {
     "chrome": dict(url="https://dl.google.com/chrome/install/standalonesetup64.exe", silent=["/silent", "/install"],
                    home="https://www.google.com/chrome/", exe=[r"C:\Program Files\Google\Chrome\Application\chrome.exe"]),
@@ -196,12 +230,17 @@ REP_SOURCES = {
                   exe=[r"C:\Program Files (x86)\Baidu\BaiduNetdisk\BaiduNetdisk.exe"]),
 }
 
+
 def _rep_info(name):
+    """返回代表软件的信息（合并 APP_CATALOG 与 REP_SOURCES）"""
     if name in APP_CATALOG:
         return APP_CATALOG[name]
     return REP_SOURCES.get(name) or dict(url=None, silent=[], home="", exe=[])
 
+
 def scan_catalog():
+    """扫描全部大分类：已装软件 + 缺类代表。返回 (分类总览文本, 缺类清单)
+    需要 scan 授权。"""
     need = require_consent("scan", "扫描本机软件分类")
     if need:
         return need, []
@@ -228,7 +267,9 @@ def scan_catalog():
         missing.append((cat, lack))
     return "\n".join(lines), missing
 
+
 def scan_installed_all():
+    """从注册表读取本机已装软件（补充分类总览）——需要 scan 授权"""
     need = require_consent("scan", "读取已装软件清单")
     if need:
         return [need]
@@ -262,11 +303,14 @@ def scan_installed_all():
             pass
     return sorted(names)
 
+
 def _detect_exe(app):
+    """返回工具的可执行路径；未装返回 None"""
     for exe in APP_CATALOG[app]["exe"]:
         if os.path.exists(exe):
             return exe
     return None
+
 
 def list_apps():
     lines = ["可调度工具（类别 | 名称 | 状态 | 官网）"]
@@ -276,23 +320,27 @@ def list_apps():
         lines.append("%s | %s | %s | %s" % (info["cat"], name, st, info["home"]))
     return "\n".join(lines)
 
-def find_by_text(text):
-    t = text.lower()
 
+def find_by_text(text):
+    """把用户的话匹配到工具名（强特征词优先，通用词兜底）"""
+    t = text.lower()
+    # 一阶段：强特征词（语言/平台/工具专名，如 c++、android、鸿蒙）
     for name, info in APP_CATALOG.items():
         if any(w in t for w in info.get("strong", [])):
             return name
-
+    # 二阶段：工具名/通用词
     for name, info in APP_CATALOG.items():
         if name in t or any(w in t for w in info["win"]):
             return name
-
+    # 类别兜底
     for cat, app in CAT_DEFAULT.items():
         if cat in text:
             return app
     return None
 
+
 def install(app):
+    """官方直链下载 + 静默安装（仅支持 url 的工具）。需要 install 授权。"""
     need = require_consent("install", "自动下载安装软件")
     if need:
         return need
@@ -310,7 +358,7 @@ def install(app):
         urllib.request.urlretrieve(info["url"], dl)
     except Exception as e:
         return "下载失败: %s" % e
-
+    # 静默安装
     if info["silent"]:
         print("  静默安装中...")
         subprocess.run([dl] + info["silent"], capture_output=True, timeout=300,
@@ -321,7 +369,9 @@ def install(app):
         return "%s 已下载安装器，但未检测到安装完成（可能需手动点下一步）: %s" % (app, dl)
     return "已下载: %s（非静默安装，请手动运行）" % dl
 
+
 def open_app(app, args=None):
+    """启动工具（参数可选）"""
     exe = _detect_exe(app)
     if not exe:
         r = install(app)
@@ -337,6 +387,7 @@ def open_app(app, args=None):
     except Exception as e:
         return "启动失败: %s" % e
 
+
 def write_code(path, code):
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -344,23 +395,23 @@ def write_code(path, code):
             f.write(code)
     except Exception as e:
         return "写入失败: %s" % e
-
+    # 语法检查（.py 用 compile，其他文件跳过）
     err = None
     if path.lower().endswith(".py"):
         try:
             compile(code, path, "exec")
         except SyntaxError as e:
             err = "语法错误: %s（行 %s）" % (e.msg, e.lineno)
-
+    # 按文件类型选 IDE（没装则自动找/下载）
     ext = os.path.splitext(path)[1].lower()
     if ext in (".ets", ".ts", ".json"):
-        ide = _pick_ide(["deveco", "vscode", "notepad3"])
+        ide = _pick_ide(["deveco", "vscode", "notepad3"])      # 鸿蒙
     elif ext in (".kt", ".java"):
-        ide = _pick_ide(["androidstudio", "vscode", "notepad3"])
+        ide = _pick_ide(["androidstudio", "vscode", "notepad3"])  # Android
     elif ext in (".c", ".cpp", ".cc", ".h", ".hpp", ".cxx"):
-        ide = _pick_ide(["vs", "codeblocks", "vscode", "notepad3"])
+        ide = _pick_ide(["vs", "codeblocks", "vscode", "notepad3"])  # C/C++
     elif ext in (".py", ".js", ".html", ".css", ".md", ".json"):
-        ide = _pick_ide(["vscode", "deveco", "notepad3"])
+        ide = _pick_ide(["vscode", "deveco", "notepad3"])       # Python/Web
     else:
         ide = _pick_ide(["vscode", "deveco", "notepad3"])
     r = open_app(ide, [path])
@@ -368,19 +419,23 @@ def write_code(path, code):
         return "%s\n代码已保存: %s（用 %s 打开）\n%s" % (r, path, ide, err)
     return "%s\n代码已保存: %s（用 %s 打开）" % (r, path, ide)
 
+
 def _pick_ide(cands):
+    """按优先级返回第一个已装的 IDE；都没有则返回第一个（触发自动下载）"""
     for c in cands:
         if _detect_exe(c):
             return c
     return cands[0]
 
+
 def preinstall_ask():
+    """缺类代表软件 → 优先类先询问，其他类以后再说。需要 install 授权。"""
     need = require_consent("install", "自动下载安装软件")
     if need:
         return need
     overview, missing = scan_catalog()
     dl_all = [(cat, n) for cat, lack in missing for n in lack if _rep_info(n).get("url")]
-    pri = [(c, n) for c, n in dl_all if c in PRIORITY_CATS]
+    pri = [(c, n) for c, n in dl_all if c in PRIORITY_CATS]   # 常用优先
     rest = [(c, n) for c, n in dl_all if c not in PRIORITY_CATS]
     if not pri:
         return ("常用类（视频/下载/文档/音乐/上网）的代表软件都已安装。"
@@ -409,7 +464,9 @@ def preinstall_ask():
         results.append("[%s] %s -> %s" % (cat, name, install_rep(name)))
     return "\n".join(results)
 
+
 def generate_report():
+    """生成可视 HTML 分类报告并打开浏览器"""
     overview, missing = scan_catalog()
     rows = []
     for cat, tools in CATEGORIES.items():
@@ -459,7 +516,9 @@ __ROWS__
     except Exception:
         return "报告已生成: %s（请手动打开）" % path
 
+
 def install_rep(name):
+    """安装代表软件（官方直链，能静默则静默；大软件提示官网）"""
     info = _rep_info(name)
     if not info.get("url"):
         return ("需手动安装（大软件/官网直链待补）：%s" % info.get("home") or name)
@@ -479,6 +538,10 @@ def install_rep(name):
     return "已下载: %s（请手动安装）" % dl
 
 
+# ---------------- 绿色/单文件软件发现（不写注册表也能用） ----------------
+
+# 绿色/单文件软件扫描目录：优先 config.json 的 paths.portable_dirs（按你本机实际填写）；
+# 未配置时扫描 FairyX 根目录 + 常见绿色软件目录 + 各盘根（E:\ F:\ 整盘会较慢，可自行删减）
 PORTABLE_DIRS = (_cpaths.get("portable_dirs") or
                  [os.path.join(D, "tools"), os.path.join(D, "everything"),
                   r"C:\Portable", r"D:\Portable", r"D:\Tools", r"D:\Green"])
@@ -486,17 +549,21 @@ PORTABLE_SKIP = ("unins", "updater", "wizard", "regfix", "trainer")
 PORTABLE_BAD_WORDS = ("install", "setup", "unins", "卸载", "安装", "下载器", "online_installer",
                       "独立版", "regsetup", "regfix", "update", "repair", "runtime")
 
+
 def _is_portable_exe(name):
+    """过滤安装包/系统组件，只留绿色软件/单文件程序"""
     low = name.lower()
     if low.startswith(PORTABLE_SKIP):
         return False
     for w in PORTABLE_BAD_WORDS:
         if w in low:
             return False
-
+    # 绿色/便携/工具特征
     return True
 
+
 def discover_portable(depth=1, limit=100):
+    """扫描常见绿色软件目录，找单文件/免安装 exe（不写注册表）"""
     found = []
     for d in PORTABLE_DIRS:
         if not os.path.isdir(d):
@@ -525,14 +592,18 @@ def discover_portable(depth=1, limit=100):
             continue
     return _dedup(found)
 
+
 def _dedup(found):
+    """同 exe 名只留一个（取最短路径）"""
     seen = {}
     for f, p in found:
         if f not in seen or len(p) < len(seen[f]):
             seen[f] = p
     return sorted(seen.items())
 
+
 def open_portable(name_part):
+    """按名称片段调用绿色软件（不写注册表的单文件程序）"""
     found = discover_portable(depth=1, limit=200)
     hit = [p for f, p in found if name_part.lower() in f.lower()]
     if not hit:
@@ -543,6 +614,7 @@ def open_portable(name_part):
         return "已启动绿色软件: %s" % os.path.basename(p)
     except Exception as e:
         return "启动失败: %s" % e
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="FairyX 工具调度中心")

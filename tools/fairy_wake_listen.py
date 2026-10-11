@@ -1,4 +1,25 @@
 # -*- coding: utf-8 -*-
+"""
+fairy_wake_listen.py -- 喊了就应（立即可用版）
+
+【为什么有这个文件】
+  用户反复喊「你好Fairy」没反应，因为：
+    · Sherpa-ONNX KWS 方案做出来了，但【还没接进 fairy_ear.py】
+    · 而 fairy_ear.py 之前被停掉了（那时它还是坏的）
+    -> 等于对着一台关着的麦克风喊
+  这个文件是【立即可用】的过渡版：双引擎监听，命中就播一句游戏原声应答。
+
+【两个引擎一起听（提高命中）】
+  A 中文模型 + n ǐ h ǎo f a i r y   <- 「你好fairy」
+  B 英文模型 + ▁FA IR Y             <- 「Fairy」（用户只说英文词也能中）
+
+【用法】
+  py -3.12 D:\\FAIRY\\tools\\fairy_wake_listen.py              一直听
+  py -3.12 D:\\FAIRY\\tools\\fairy_wake_listen.py 120          只听 120 秒
+  py -3.12 D:\\FAIRY\\tools\\fairy_wake_listen.py --list        列出麦克风
+
+【应答】命中后随机播一句【游戏原声】（我在 / 主人 / 对了主人 / 嗯 / 好的主人 / 是主人）
+"""
 import os
 import random
 import sys
@@ -25,11 +46,11 @@ VROOT = fairy_root.VOICES
 
 ZH_RULE = "n \u01d0 h \u01ceo f a i r y :1.0 @\u4f60\u597dfairy"
 EN_RULE = "\u2581FA IR Y :1.0 @FAIRY"
-
+# 备用关键词（放宽命中率）：只喊 fairy / 你好飞瑞
 ZH_RULE2 = "f a i r y :1.0 @fairy"
 ZH_RULE3 = "n \u01d0 h \u01ceo f \u0113i r u\u00ec :1.0 @\u4f60\u597d\u98de\u745e"
 
-
+# 应答池：全部是【游戏里 Fairy 的原声】
 REPLY_POOL = [
     ("9e5768b731f53e37.wav", "\u6211\u5728", 0.56),
     ("143061844b420ef5.wav", "\u6211\u5728", 0.59),
@@ -42,11 +63,13 @@ REPLY_POOL = [
     ("1c303966a663b7b6.wav", "\u597d\u7684\u4e3b\u4eba", 1.09),
 ]
 
+
 def write_kw(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text + "\n")
     return path
+
 
 def build(base, kwpath, score=1.0, thr=0.10):
     p = lambda n: os.path.join(base, n)
@@ -57,6 +80,7 @@ def build(base, kwpath, score=1.0, thr=0.10):
         joiner=p("joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
         num_threads=2, keywords_file=kwpath,
         keywords_score=score, keywords_threshold=thr, provider="cpu")
+
 
 def find_mic():
     best = None
@@ -73,10 +97,18 @@ def find_mic():
             best = (i, nm)
     return best if best else (None, None)
 
+
 REPLY_TEXTS = ["我在", "主人", "对了主人", "嗯", "好的主人", "是主人"]
 CLONE_URL = "<动态：ep.tts_get() 内部按降级链选择>"
 
+
 def play_reply(last_text):
+    """应答：走克隆合成（不再播游戏原文件）。
+       ★ 2026-10-09 用户要求取消和游戏的关联。
+       ★ 2026-10-10 独立运行改造：改走 ep.tts_get() 的统一降级链
+         （9881 直连 -> DSH 插件 -> 本地 fairy_host -> DSH tts-api），
+         DSH 关掉后唤醒应答照样出声。
+    """
     import wave as wv
     import tempfile
     cands = [x for x in REPLY_TEXTS if x != last_text] or REPLY_TEXTS
@@ -194,6 +226,7 @@ def main():
     print("-" * 56, flush=True)
     print("total hits: %d" % hits, flush=True)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

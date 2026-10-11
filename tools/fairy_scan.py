@@ -1,4 +1,11 @@
 # -*- coding: utf-8 -*-
+r"""
+FairyX 设备扫描器 fairy_scan.py
+扫描：硬件（CPU/GPU/内存/磁盘/网卡/音频/显示器）、软件（注册表+目录）、
+可用服务（端口探测）、存储资产（Everything 优先，回退全盘搜索安装包/模型包）。
+产出：<FairyX 根目录>\data\scan_report.md（中文报告）
+用法：py -3.12 tools/fairy_scan.py
+"""
 import ctypes
 import json
 import os
@@ -13,17 +20,18 @@ import urllib.request
 import winreg
 from concurrent.futures import ThreadPoolExecutor
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）。
+#   父进程没控制台时（pythonw / 计划任务），不加这个起 powershell/es 就弹终端。
 CREATE_NO_WINDOW = 0x08000000
 
-
+# FairyX 根目录：由脚本位置推导（tools/ 的上一级）
 HERE = os.path.dirname(os.path.abspath(__file__))
 D = os.path.dirname(HERE)
 
 OUT_MD = os.path.join(D, "data", "scan_report.md")
 OUT_JSON = os.path.join(D, "data", "scan_report.json")
 
-
+# 已知功能服务：端口 + 说明
 SERVICES = [
     (11434, "Ollama 本地大脑", "qwen3.5-9b/27b"),
     (8080,  "llama-server 备用大脑", "Vulkan 小模型"),
@@ -35,7 +43,7 @@ SERVICES = [
     (8000,  "Web UI 常见端口", "待识别"),
 ]
 
-
+# 常用软件探测：可执行文件路径特征
 SOFTWARE_PROBES = [
     ("Ollama",            r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
     ("Everything",        r"%LOCALAPPDATA%\Everything\Everything.exe"),
@@ -58,15 +66,17 @@ SOFTWARE_PROBES = [
     ("EverythingSDK-es2", r"C:\Everything\es.exe"),
 ]
 
-
+# 模型包扩展名
 MODEL_EXTS = (".gguf", ".safetensors", ".onnx", ".bin", ".ckpt", ".pt", ".pth", ".mlx", ".ot")
-
+# 安装包扩展名
 INSTALL_EXTS = (".exe", ".msi", ".msix", ".zip", ".7z", ".rar", ".tar", ".gz", ".whl", ".apk")
 
-
+# 扫描目录（所有盘 + 用户目录），Everything 不可用时的回退
 ROOTS = []
 
+
 def expand(p):
+    """展开 %VAR% 与通配符，返回存在的路径列表"""
     p = os.path.expandvars(p)
     if "*" in p:
         base, pat = os.path.split(p)
@@ -76,6 +86,7 @@ def expand(p):
             except Exception:
                 return []
     return [p] if os.path.exists(p) else []
+
 
 def probe_software():
     found = []
@@ -88,7 +99,9 @@ def probe_software():
                 pass
     return found
 
+
 def reg_installed():
+    """注册表卸载列表（64位+32位）"""
     apps = {}
     keys = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
@@ -130,6 +143,7 @@ def reg_installed():
             pass
     return apps
 
+
 def ps_out(cmd):
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
@@ -139,7 +153,9 @@ def ps_out(cmd):
     except Exception:
         return ""
 
+
 def collect_hardware():
+    """一次 PowerShell 调用拿全硬件（避免 8 次子进程启动，参照 HiBit/系统工具的直读思路）"""
     hw = {}
     script = r"""
 $o = @{}
@@ -170,7 +186,9 @@ $o | ConvertTo-Json -Compress
               "网卡": "未知", "音频设备": "未知", "显示器": "未知"}
     return hw
 
+
 def probe_services():
+    """并行探测端口（参照 Everything 毫秒级索引思路：能并行就不串行）"""
     def check(port, name, note):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(0.3)
@@ -185,6 +203,7 @@ def probe_services():
         results = list(ex.map(lambda t: check(*t), SERVICES))
     return [r for r in results if r]
 
+
 def find_everything_es():
     for fp in [r"C:\Everything\es.exe", r"D:\Everything\es.exe",
                r"C:\Program Files\Everything\es.exe",
@@ -195,7 +214,9 @@ def find_everything_es():
             return fp
     return None
 
+
 def everything_search(es, pattern, limit=300):
+    """es.exe 搜索，返回文件路径列表"""
     try:
         r = subprocess.run([es, "-s", pattern], capture_output=True, text=True, timeout=60,
                            creationflags=CREATE_NO_WINDOW)
@@ -204,7 +225,9 @@ def everything_search(es, pattern, limit=300):
     except Exception:
         return []
 
+
 def fallback_scan():
+    """Everything 不可用时的全盘回退：只搜根目录一层 + 用户目录（避免过慢）"""
     found = {"models": [], "installs": []}
     roots = []
     for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
@@ -227,7 +250,9 @@ def fallback_scan():
             pass
     return found
 
+
 def parse_everything_size(s):
+    """解析 Everything 的大小文本（如 '123,728 KB' / '1.5 GB'）为字节，避免逐个 getsize 磁盘调用"""
     try:
         s = s.strip().replace(",", "")
         m = re.match(r"([\d.]+)\s*(TB|GB|MB|KB|B)?", s)
@@ -239,7 +264,9 @@ def parse_everything_size(s):
     except Exception:
         return 0
 
+
 def everything_http_search(query, max_items=6000):
+    """Everything HTTP 一次大 count 查询，返回 [(路径, 字节大小)]（HTML 解析，无磁盘 getsize）"""
     items = {}
     offset = 0
     while offset < max_items:
@@ -249,7 +276,7 @@ def everything_http_search(query, max_items=6000):
             html = urllib.request.urlopen(url, timeout=30).read().decode("utf-8", "ignore")
         except Exception:
             break
-
+        # 每个结果行：<a href="/路径"><img class="icon" src="/file.gif"...>名字</a> ... <td class="sizedata">...大小</td>
         rows = re.split(r'<tr class="trdata\d">', html)[1:]
         got = 0
         for row in rows:
@@ -270,7 +297,9 @@ def everything_http_search(query, max_items=6000):
         offset += 500
     return list(items.items())
 
+
 def everything_online():
+    """探测 Everything HTTP 服务是否在线"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.8)
     try:
@@ -278,17 +307,19 @@ def everything_online():
     finally:
         s.close()
 
+
 def scan_storage():
+    """存储资产扫描：Everything 合并查询（一次查全部模型扩展名 + 直接拿大小，毫秒级）"""
     res = {"engine": "", "models": [], "installs": []}
     if everything_online():
         res["engine"] = "Everything HTTP 服务（端口 8092，MFT 索引直读）"
-
+        # 模型包：一次查询所有扩展名（Everything 的 | 语法 = 或）
         for p, sz in everything_http_search(
                 "ext:gguf | ext:safetensors | ext:onnx | ext:ckpt | ext:pt | ext:pth | ext:mlx | ext:ot"):
             low = p.lower()
             if low.endswith((".gguf", ".safetensors", ".onnx", ".ckpt", ".pt", ".pth", ".mlx", ".ot")):
                 res["models"].append((p, sz))
-
+        # 软件安装包
         for p, sz in everything_http_search(
                 "ext:exe size:>1mb | ext:msi | ext:whl | ext:apk | ext:zip size:>100mb | ext:7z size:>100mb"):
             res["installs"].append((p, sz))
@@ -301,7 +332,9 @@ def scan_storage():
     res["installs"].sort(key=lambda x: x[1], reverse=True)
     return res
 
+
 def fmt_size(n):
+    """字节 → 可读大小"""
     try:
         n = float(n)
     except Exception:
@@ -311,6 +344,7 @@ def fmt_size(n):
             return ("%.1f%s" % (n, unit)) if unit != "B" else ("%d%s" % (int(n), unit))
         n /= 1024
     return "?"
+
 
 def build_report(hw, sw_reg, sw_probe, svc, storage, start):
     lines = []
@@ -366,6 +400,7 @@ def build_report(hw, sw_reg, sw_probe, svc, storage, start):
     lines.append("\n---\n*本报告由 fairy_scan.py 自动生成，硬件信息来自 WMI，软件来自注册表与目录探测，存储资产来自 Everything 服务。*")
     return "\n".join(lines)
 
+
 def main():
     start = time.time()
     print("[1/5] 采集硬件信息 ...")
@@ -396,6 +431,7 @@ def main():
     print("内存: %s | 磁盘: %s" % (hw.get("内存", "?"), "; ".join(hw.get("磁盘", []))))
     print("服务在线: %d | 已装软件: %d | 模型包: %d | 安装包: %d" % (
         len(svc), len(sw_reg), len(storage["models"]), len(storage["installs"])))
+
 
 if __name__ == "__main__":
     main()

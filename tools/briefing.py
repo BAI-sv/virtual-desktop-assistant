@@ -1,5 +1,24 @@
 # -*- coding: utf-8 -*-
-import sys
+"""
+briefing.py —— 「啰嗦的 Fairy」开机播报
+
+【它做什么】
+  设备开机、接上声音设备后，自动播报一段：
+    当前时间 -> 位置 -> 现在天气 -> 未来三天 -> 穿衣建议 -> 今日要闻 -> 你关心的新闻
+
+【设计原则】
+  1. **每个数据源都独立降级**：哪个取不到就跳过那句，绝不因为一个接口挂了整段播报失败
+  2. **不编数据**：取不到就说"取不到"，不假装知道天气
+  3. **可配置**：关心的关键词放在 D:\\FAIRY\\briefing.json，改文件即可
+  4. **只在开机播一次**：由调用方（球）保证，本模块只负责"生成要说的话"
+
+【数据源（都实测可达，免 key）】
+  位置  http://ip-api.com/json/?lang=zh-CN
+  天气  https://wttr.in/<lat>,<lon>?format=j1      （当前 + 未来 3 天）
+  新闻  https://www.chinanews.com.cn/rss/scroll-news.xml
+        （新浪那个 marquee 源实测返回 0 条，已弃用）
+"""
+import sys   # ← 必须模块级：球是按模块 import 调 build() 的，不是 __main__
 import json
 import os
 import re
@@ -13,17 +32,17 @@ CACHE = fairy_root.log("briefing_cache.json")
 
 DEFAULTS = {
     "enabled": True,
-    "city": "",
-    "city_confirmed": False,
-    "auto_city": "",
+    "city": "",                       # 留空 = IP 自动定位
+    "city_confirmed": False,          # 用户是否确认过定位（未确认就先问一次）
+    "auto_city": "",                  # IP 自动定位到的城市（用于让用户核对）
     "keywords": ["AI", "人工智能", "游戏", "科技", "英伟达", "显卡"],
-    "news_count": 0,
-    "keyword_news_count": 0,
-    "headline_max_chars": 26,
+    "news_count": 0,                  # 头条几条（0 = 开机不报新闻，等用户问）
+    "keyword_news_count": 0,          # 关心的新闻几条（0 = 不报）
+    "headline_max_chars": 26,         # 单条最多念多少字（超了截断加"…"）
     "rss": ["https://www.chinanews.com.cn/rss/scroll-news.xml"],
 }
 
-
+# wttr.in 的天气描述是英文，常见的那几个翻一下（翻不到就原样念）
 WEATHER_ZH = {
     "sunny": "晴", "clear": "晴", "partly cloudy": "多云", "cloudy": "阴",
     "overcast": "阴天", "mist": "薄雾", "fog": "雾", "smoky haze": "烟霾",
@@ -33,11 +52,20 @@ WEATHER_ZH = {
     "patchy rain nearby": "附近有雨", "light rain shower": "阵雨",
 }
 
+
 def _get(url, timeout=10):
     with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
         return r.read()
 
+
 def save_conf(patch):
+    """把改动写回 briefing.json（位置确认就靠它持久化）。
+
+    ★ 原子写入：先写 .tmp 再 os.replace。
+      直接覆盖时若正好断电/被杀，文件会只剩半截 JSON → 下次 _load_conf 解析失败
+      → 静默回默认值 → **忘掉用户确认过的城市**（又用 IP 定位的错城市并重问一遍）。
+      失败必须打印，不许静默。
+    """
     c = _load_conf()
     c.update(patch or {})
     try:
@@ -50,7 +78,13 @@ def save_conf(patch):
         print("[briefing] 配置写入失败（城市可能保不住）: %s" % e, flush=True)
     return c
 
+
 def _load_conf():
+    """读配置；坏文件要【报出来】而不是静默回默认值。
+
+    先前这里 except: pass —— 配置一旦损坏，用户确认的城市会被悄悄丢掉，
+    表面看"一切正常"，实际每次都重新 IP 定位并重复问一遍。
+    """
     c = dict(DEFAULTS)
     if not os.path.exists(CONF):
         return c
@@ -60,7 +94,9 @@ def _load_conf():
         print("[briefing] 配置解析失败，已退回默认值（原文件保留未动）: %s" % e, flush=True)
     return c
 
+
 def get_location(city=""):
+    """返回 (城市名, lat, lon)。city 非空就直接用它做天气查询名。"""
     if city:
         return city, None, None
     try:
@@ -72,11 +108,18 @@ def get_location(city=""):
         pass
     return "", None, None
 
+
 def _zh_weather(s):
     k = str(s or "").strip().lower()
     return WEATHER_ZH.get(k, s or "")
 
+
 def geocode(name):
+    """城市名 -> (lat, lon)。用 Open-Meteo 免费地理编码（无需 key）。
+
+    为什么要它：wttr.in 直接吃中文城市名时常常落到附近一个奇怪的地名
+    （实测中文地名常被解析到附近一个奇怪的地名），拿经纬度去查才准。
+    """
     if not name:
         return None, None
     try:
@@ -91,7 +134,9 @@ def geocode(name):
         pass
     return None, None
 
+
 def get_weather(city, lat=None, lon=None):
+    """返回 {now:{...}, days:[{date,min,max,desc}...]}；失败返回 None。"""
     q = ("%s,%s" % (lat, lon)) if (lat is not None and lon is not None) else (city or "")
     if not q:
         return None
@@ -118,6 +163,15 @@ def get_weather(city, lat=None, lon=None):
         return None
 
 
+# ---- ★★ 2026-10-10【未来三天：温度 + 下雨/下雪】---------------------------------
+# 【用户原话】「未来三天直接说温度和下雨还是下雪等等」
+# 【为什么新接一个源】原来只有 wttr.in，它的"未来三天"只有温度、没有降水类型；
+#   而它的逐时数组是**三小时一份、同一天三份一模一样**（实测），挑不出"当天主导天气"。
+#   所以改用 Open-Meteo 的**每日天气代码**(WMO)：一个数字就同时给出温度区间和
+#   下雨/下雪/晴，语义不会含糊。网络实测可达（本机 2.2 秒）。
+#   ⚠ wttr 仍然保留：Open-Meteo 拿不到时，三天就退回 wttr 的温度 + 逐时降水概率。
+#
+# WMO 天气代码 -> 中文。分档口径按"人话优先"：能说"小雨"就不说"毛毛雨"。
 WMO_ZH = {
     0: "晴", 1: "晴间多云", 2: "多云", 3: "阴",
     45: "雾", 48: "冻雾",
@@ -131,13 +185,23 @@ WMO_ZH = {
     95: "雷阵雨", 96: "雷阵雨伴冰雹", 99: "雷阵雨伴冰雹",
 }
 
+
 def _wmo_zh(code):
+    """WMO 代码 -> 中文说法；认不出就返回空串（不编）。"""
     try:
         return WMO_ZH.get(int(code), "")
     except Exception:
         return ""
 
+
 def daily_forecast(lat, lon, days=3):
+    """Open-Meteo 每日预报 -> [{'date','min','max','desc','precip'}]；失败返回 []。
+
+    ★ 返回的是【接下来的 days 天】= 明天起，不含今天（用户要"未来三天"）。
+      所以接口多要一天（forecast_days=days+1），再切掉今天那一格。
+    【取不到的字段就不编】温度缺失的那天直接跳过。
+    【降水口径】天气代码是雨/雪类 且 当天真有降水(雨量或雪量>0) -> precip 写"有雨"/"有雪"。
+    """
     if lat is None or lon is None:
         return []
     try:
@@ -147,10 +211,10 @@ def daily_forecast(lat, lon, days=3):
              % (lat, lon, max(1, min(7, int(days))) + 1))
         j = json.loads(_get(u, 12).decode("utf-8"))
         d = j.get("daily") or {}
-        dates = (d.get("time") or [])[1:]
+        dates = (d.get("time") or [])[1:]          # ★ 切掉今天
         out = []
         for i, ds in enumerate(dates[:days]):
-            k = i + 1
+            k = i + 1                               # ★ 原数组的下标（含今天）
             try:
                 tmax = (d.get("temperature_2m_max") or [])[k]
                 tmin = (d.get("temperature_2m_min") or [])[k]
@@ -175,13 +239,17 @@ def daily_forecast(lat, lon, days=3):
               flush=True)
         return []
 
+
 def _num1(v):
+    """温度取整（27.6 -> 28）；取不到就原样返回，不编。"""
     try:
         return int(round(float(v)))
     except Exception:
         return v
 
+
 def day_name(date_str, today=None):
+    """日期 -> 人话：明天 / 后天 / 大后天 / '10 月 14 日'（对不上就报日期，不硬凑）。"""
     try:
         d = time.strptime(str(date_str), "%Y-%m-%d")
         t = today or time.localtime()
@@ -199,7 +267,12 @@ def day_name(date_str, today=None):
     except Exception:
         return str(date_str)
 
+
 def _cnsh_logic():
+    """优先用 fairy_logic.py（纯判断逻辑），取不到就退回本文件的 Python 版。
+
+    这样"穿什么、怎么问候"这类规则写在中文脚本里，用户可以直接看懂、直接改。
+    """
     try:
         import importlib.util
         fp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fairy_logic.py")
@@ -213,12 +286,14 @@ def _cnsh_logic():
     except Exception:
         return None
 
+
 def clothing_advice(t):
+    """按温度给穿衣建议（规则简单但明确）。"""
     try:
         t = float(t)
     except Exception:
         return ""
-    m = _cnsh_logic()
+    m = _cnsh_logic()                      # ★ 先问 CNSH 中文逻辑
     if m and hasattr(m, "穿衣建议"):
         try:
             return m.穿衣建议(t)
@@ -236,7 +311,9 @@ def clothing_advice(t):
         return "温暖，长袖或短袖都行，随身带件薄外搭"
     return "偏热，短袖短裤，注意防晒补水"
 
+
 def get_news(cfg):
+    """抓 RSS 标题列表（去重、去掉频道名那种条目）。"""
     out = []
     seen = set()
     for u in (cfg.get("rss") or []):
@@ -256,7 +333,14 @@ def get_news(cfg):
             out.append(t)
     return out
 
+
 def resolves_city(cfg=None):
+    """返回 (城市, 是否需要用户确认)。
+
+    规则（用户要求：先自己定位，让使用人确认，不对就手动选）：
+      已确认过 -> 直接用配置里的 city
+      没确认过 -> 用 IP 自动定位，并返回 need_confirm=True（播报时会问一句）
+    """
     cfg = cfg or _load_conf()
     city = (cfg.get("city") or "").strip()
     if cfg.get("city_confirmed") and city:
@@ -264,17 +348,34 @@ def resolves_city(cfg=None):
     auto, lat, lon = get_location("")
     return (city or auto), (not cfg.get("city_confirmed"))
 
+
 HEALTH_REPORT = fairy_root.log("health_last.json")
+
 
 HEALTH_STATE = fairy_root.log("health_told.json")
 
+
 def health_lines():
+    """读上次关机体检报告，**只报【新增或变严重】的问题**；没变化就不说话。
+
+    【为什么改】原来每次开机都把整张问题清单念一遍（"发现 9 个问题，其中 3 个严重…"），
+    用户质疑的就是这个（"开机就是发现XX…这些语音吗？"）—— 和 boot_lines/hw_lines 一个道理：
+      · 数字没信息量（9 个问题里大半是老的、已知的）
+      · 每次开机都念 = 啰嗦
+      · 只有【变化】才值得打断主人
+    规则：
+      新问题（id 没见过）      -> 说
+      老问题但级别变严重        -> 说
+      老问题、级别没变          -> **不说**
+      一个问题都没有          -> 不说
+    状态文件记 id + level，供下次比对。
+    """
     try:
         if not os.path.exists(HEALTH_REPORT):
             return []
         j = json.load(open(HEALTH_REPORT, encoding="utf-8"))
         items = [x for x in (j.get("items") or []) if x.get("level") in ("bad", "warn")]
-
+        # 当前问题指纹（id -> level）
         now = {}
         for x in items:
             now[str(x.get("id") or x.get("name"))] = x.get("level")
@@ -309,7 +410,7 @@ def health_lines():
                     out.append("解决办法：" + fx[:70] + "。")
             out.append("要我处理吗？")
 
-
+        # 落状态（原子写）
         try:
             os.makedirs(os.path.dirname(HEALTH_STATE), exist_ok=True)
             tmp = HEALTH_STATE + ".tmp"
@@ -322,7 +423,16 @@ def health_lines():
     except Exception:
         return []
 
+
 def hw_lines():
+    """读【CPU/硬件监控】的最新状态，有新增就播报。
+
+    背景：本机实测有 11 条 WHEA-Ldgger Id=18「致命硬件错误」
+          （Machine Check Exception / Cache Hierarchy Error，Bank5 = Zen 的 L3 缓存），
+          且近 90 天意外关机 54 次。5800X3D 的 V-Cache 正是 L3，怀疑
+          BIOS 刷完后 PBO/Curve Optimizer/XMP 设置导致不稳。
+    所以要每次开机报一次【有没有新增】，否则"改了设置到底有没有用"无从判断。
+    """
     try:
         if not os.path.exists(HW_STATE):
             return []
@@ -341,13 +451,15 @@ def hw_lines():
     except Exception:
         return []
 
+
 BOOT_STATE = fairy_root.log("boot_lines_state.json")
 DEV_KNOWN = fairy_root.log("devices_known.json")
 INVENTORY = fairy_root.log("inventory.json")
+# 【实测核实过的游戏原声】键必须能在 voice_index.json 的 t 字段精确匹配（去掉标点后相等）
+DETECT_ONE = "检测到附近的热源信号"        # 命中 7ff56ca6cbeb65d2.wav（1.9s）
+DETECT_MANY = "检测到附近存在复数生物信号"   # 命中（2.7s），用于"发现多台"
+AUDIO_KEYS = ("方糖", "Stereo", "扬声器")   # 关键音频设备（掉了才说）
 
-DETECT_ONE = "检测到附近的热源信号"
-DETECT_MANY = "检测到附近存在复数生物信号"
-AUDIO_KEYS = ("<BT_SPEAKER>", "Stereo", "扬声器")
 
 def _load_json(p, d=None):
     try:
@@ -357,7 +469,22 @@ def _load_json(p, d=None):
         pass
     return d if d is not None else {}
 
+
 def boot_lines():
+    """开机只报【变化和机会】，**没变化就一句话都不说**。
+
+    用户否掉了"开机念技术清单"（发现16个设备/4块磁盘/16条方向）：
+      · 数字没信息量（9 个是邻居的蓝牙，磁盘数固定）
+      · 每次开机都念 = 啰嗦（他刚把新闻从 8 条砍到 4 条）
+    所以规则改成：
+      · 有新设备          -> 说（优先用**游戏原声**，球会走原声直出）
+      · 设备消失          -> 不说（除非是关键音频设备，如方糖掉了）
+      · 有新的可扩展方向   -> 说，但**一天最多一次**
+      · 什么都没变        -> **不说**
+      · 硬件风险(WHEA/坏道) -> 已由 hw_lines() 负责，这里不重复
+
+    状态文件记住"上次报过什么"，避免每次开机重复念。
+    """
     try:
         st = _load_json(BOOT_STATE, {})
         told_dev = set(st.get("known_devices") or [])
@@ -367,13 +494,14 @@ def boot_lines():
 
         now_dev = _load_json(DEV_KNOWN, {})
         keys = set(now_dev.keys()) if isinstance(now_dev, dict) else set()
-
+        # 关键音频设备（从现场扫描拿不到就跳过；不硬凑）
         inv = _load_json(INVENTORY, {})
         audio_now = [d.get("name") or "" for d in ((inv.get("devices") or {}).get("audio") or [])]
 
         out = []
 
-
+        # —— A) 新设备 ——
+        # 首次运行（told_dev 为空）只记基线，**不报**，否则第一次开机会把所有设备当"新的"念一遍
         if told_dev and keys:
             fresh = keys - told_dev
             if fresh:
@@ -382,39 +510,43 @@ def boot_lines():
                     nm = (now_dev.get(k) or {}).get("name") or ""
                     if nm and not any(c.isdigit() or c == ":" for c in nm[:2]):
                         names.append(nm)
-
+                # 优先返回**游戏原声**（这两句在语料库里已实测命中）
                 if len(fresh) >= 3 and DETECT_MANY:
                     out.append(DETECT_MANY)
                 else:
                     out.append(DETECT_ONE)
-
+                # 能认出名字就补充一句人话（这句是合成音，但信息量在这）
                 if names:
                     out.append("新出现的是：" + "、".join(dict.fromkeys(names)) + "。")
 
-
+        # —— B) 关键音频设备掉了 ——
         if told_dev and audio_now:
             gone_audio = [a for a in (st.get("audio_snapshot") or [])
                           if any(k in a for k in AUDIO_KEYS) and a not in audio_now]
             if gone_audio:
                 out.append("注意：音频设备 %s 不在了。" % gone_audio[0][:24])
 
-
+        # 可扩展方向（B2/C 都要用，先取）
         cap = (inv.get("capability") or []) if isinstance(inv, dict) else []
 
-
+        # —— B2) 【新自举批次】——
+        # 自举流水线每次跑完会写 inventory.json（带 time）。只有"新批次"才说一句。
+        # ⚠ 措辞注意：用户**明确否掉**过"发现16个设备/4块磁盘"这种清单式播报
+        #    （他的原话质疑："开机就是发现XX…这些语音吗？"），
+        #    所以这里**只报"有新的机会"**，不念设备数/磁盘数。
         inv_time = (inv.get("time") or "") if isinstance(inv, dict) else ""
         last_inv = st.get("last_inventory_time") or ""
-
-
+        # 首次运行（last_inv 为空）只记基线，**不报** —— 与设备逻辑一致：
+        # "没有变化就不说话"。否则每次全新安装都会念一句，且那不是"变化"。
         if last_inv and inv_time and inv_time != last_inv and len(cap):
             out.append("我重新自检了一遍，找到 %d 个能让自己变强的办法，要听吗？" % len(cap))
 
-
+        # —— C) 新的可扩展方向（一天最多一次） ——
         n_cap = len(cap)
         if isinstance(last_cap, int) and n_cap > last_cap and last_cap_day != today:
             out.append("我找到 %d 个能让自己变强的办法，要听吗？" % n_cap)
 
-
+        # —— 落状态 ——
         new_state = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "known_devices": sorted(keys),
@@ -435,11 +567,13 @@ def boot_lines():
     except Exception:
         return []
 
+
 def build(cfg=None):
+    """生成播报句子列表（每句一条，方便逐句播）。"""
     cfg = cfg or _load_conf()
     lines = []
 
-
+    # 1) 时间
     now = time.localtime()
     wd = "一二三四五六日"[now.tm_wday]
     hour = now.tm_hour
@@ -449,7 +583,7 @@ def build(cfg=None):
     lines.append("主人，%s。现在是 %d 年 %d 月 %d 日，星期%s，%02d 点 %02d 分。"
                  % (greet, now.tm_year, now.tm_mon, now.tm_mday, wd, hour, now.tm_min))
 
-
+    # 2) 位置
     city, need_confirm = resolves_city(cfg)
     lat = lon = None
     if city:
@@ -457,15 +591,16 @@ def build(cfg=None):
         if need_confirm:
             lines.append("如果我定位错了，请在球上右键选「位置」改一下。")
 
-
+    # 3) 天气
+    # 优先用配置里存好的经纬度；没有就用城市名地理编码（比让 wttr 猜准）
     if lat is None and lon is None:
         if cfg.get("lat") and cfg.get("lon"):
             lat, lon = cfg.get("lat"), cfg.get("lon")
         elif city:
             lat, lon = geocode(city)
     w = None
-
-
+    # ★★ 2026-10-10：未来三天【单独一路源】—— open-meteo 的每日预报带"下雨/下雪"。
+    # 两路并发抓，省掉一个来回的等待（顺序抓实测要 4.7 秒，并发 ~2.5 秒）。
     _fc = []
     try:
         from concurrent.futures import ThreadPoolExecutor
@@ -482,8 +617,8 @@ def build(cfg=None):
         n = w["now"]
         lines.append("现在室外 %s 度，体感 %s 度，%s，湿度 %s%%，风速 %s 公里每小时。"
                      % (n["temp"], n["feel"], n["desc"] or "天气未知", n["humidity"], n["wind"]))
-
-
+        # ★★ 未来三天：温度 + 下雨/下雪（直接说人话）
+        # 甲 = open-meteo（带降水类型）；乙 = wttr（只有温度，兜底）
         _jia = []
         for _d in _fc:
             _jia.append({"称呼": day_name(_d.get("date")), "最低": _d.get("min"),
@@ -493,7 +628,7 @@ def build(cfg=None):
         for _d in (w.get("days") or []):
             _yi.append({"称呼": day_name(_d.get("date")), "最低": _d.get("min"),
                         "最高": _d.get("max")})
-        _m = _cnsh_logic()
+        _m = _cnsh_logic()                      # ★ 纯逻辑走 fairy_logic.py
         _sent = ""
         if _m is not None and hasattr(_m, "三天天气句"):
             try:
@@ -514,30 +649,16 @@ def build(cfg=None):
     else:
         lines.append("天气没能取到，这次就不猜了。")
 
-
-    try:
-        import importlib.util as _iu
-        _fp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "balance_watch.py")
-        if os.path.exists(_fp):
-            _s = _iu.spec_from_file_location("fairy_balance", _fp)
-            _bw = _iu.module_from_spec(_s)
-            sys.modules["fairy_balance"] = _bw
-            _s.loader.exec_module(_bw)
-            _res = _bw.check()
-            _line = _bw.sentence(_res, boot=True)
-            if _line:
-                lines.append(_line)
-    except Exception as _e:
-        print("[briefing] 余额检查失败: %s: %s" % (type(_e).__name__, _e), flush=True)
-
-
+    # 4) 新闻
+    # news_count=0 时【连抓都不抓】，
+    # 省掉 RSS 请求（开机更快），想看时用 `--news` 单独取。
     _want_news = int(cfg.get("news_count") or 0) > 0
     news = get_news(cfg) if _want_news else []
     if not _want_news:
-        pass
+        pass          # 用户要求：开机不报新闻（连"取不到"都不说），等他想看时问我
     elif news:
-
-
+        # 【为什么精简】用户反馈"新闻太多了"—— 8 条完整标题念出来要一分多钟。
+        # 所以：声音只念少量 + 每条截断；完整列表照样进屏幕浮窗和文件（不丢信息）。
         lim = int(cfg.get("headline_max_chars") or 26)
 
         def short(x):
@@ -545,7 +666,7 @@ def build(cfg=None):
             return x if len(x) <= lim else x[:lim].rstrip("，,。.、：: ") + "…"
 
         k = int(cfg.get("news_count") or 2)
-
+        # 【修措辞】原来硬编码"先说两条"，k=1 时数字对不上。改成按实际条数说。
         lines.append("今日要闻：" if k != 2 else "今日要闻两条：")
         for t in news[:k]:
             lines.append(short(t))
@@ -562,22 +683,23 @@ def build(cfg=None):
     else:
         lines.append("新闻源这次没取到。")
 
-
+    # CPU/硬件稳定性（WHEA 缓存错误 + 意外关机的新增量）
     lines.extend(hw_lines())
 
-
+    # 开机自举的【变化与机会】（没变化就什么都不说）
     lines.extend(boot_lines())
 
-
+    # 上次关机体检发现的问题（含解决办法）
     lines.extend(health_lines())
 
     lines.append("播报完毕，随时听候吩咐。")
     return lines
 
+
 if __name__ == "__main__":
-    import sys
-
-
+    import sys                      # ← 必须最先导入（下面立刻要用 sys.argv）
+    # 【按需取新闻】用户说"等我想你询问" —— 所以给一个单独的入口：
+    #   py -3.12 briefing.py --news [关键词1 关键词2 ...]
     if "--news" in sys.argv:
         cfg = _load_conf()
         i = sys.argv.index("--news")

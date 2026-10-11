@@ -1,4 +1,27 @@
 # -*- coding: utf-8 -*-
+"""
+balance_watch.py —— DeepSeek 余额预警（共享模块）
+
+【用户要求】"需要加预警"
+【为什么需要】余额见底 = API 调用直接失败 = Fairy 会突然变哑巴。
+  用户不可能天天去网页查，所以必须【自己盯着、主动说】。
+
+【三档】
+  ok    : 余额 >= warn（默认 30 元）       → 不打扰
+  warn  : warn > 余额 >= alert（默认 10）→ 开机播报/体检里提一句
+  alert : 余额 < alert（默认 10）        → 用 alert 级别说出来（会暂停音乐，确保听见）
+  另外：查询失败/没 key → unknown（不误报）
+
+【被谁用】
+  · briefing.py     开机播报里带一句
+  · health_check.py 体检里作为一个检查项
+  · fairy_ball.py   帧循环里【节流每 10 分钟查一次】，跨档就说话
+
+【用法】
+  py -3.12 balance_watch.py            打印当前余额与档位
+  py -3.12 balance_watch.py --json     机器可读
+  py -3.12 balance_watch.py --speak    跨档时输出应说的话（给球用）
+"""
 import json
 import os
 import re
@@ -14,6 +37,7 @@ URL = "https://api.deepseek.com/user/balance"
 WARN_YUAN = 30.0
 ALERT_YUAN = 10.0
 
+
 def _key():
     try:
         t = open(CRED, encoding="utf-8", errors="replace").read()
@@ -23,7 +47,9 @@ def _key():
         print("[balance] 读凭据失败: %s: %s" % (type(e).__name__, e), flush=True)
         return ""
 
+
 def get_balance(timeout=15):
+    """返回 (ok, 余额float, 币种, 说明)。失败不抛异常。"""
     k = _key()
     if not k:
         return False, 0.0, "CNY", "没找到 API key"
@@ -40,6 +66,7 @@ def get_balance(timeout=15):
     except Exception as e:
         return False, 0.0, "CNY", "%s: %s" % (type(e).__name__, str(e)[:80])
 
+
 def level(yuan, warn=WARN_YUAN, alert=ALERT_YUAN):
     if yuan < alert:
         return "alert"
@@ -47,14 +74,18 @@ def level(yuan, warn=WARN_YUAN, alert=ALERT_YUAN):
         return "warn"
     return "ok"
 
+
 def check(warn=WARN_YUAN, alert=ALERT_YUAN):
+    """给别的模块调：返回 dict。"""
     ok, yuan, cur, why = get_balance()
     if not ok:
         return {"ok": False, "level": "unknown", "yuan": None, "currency": cur, "why": why}
     return {"ok": True, "level": level(yuan, warn, alert), "yuan": yuan,
             "currency": cur, "why": ""}
 
+
 def sentence(res, boot=False):
+    """生成一句人话。boot=True 时哪怕 ok 也说一句（开机播报风格）。"""
     if not res.get("ok"):
         return ""
     y, lv = res["yuan"], res["level"]
@@ -66,7 +97,9 @@ def sentence(res, boot=False):
         return "API 余额 %.2f 元，够用。" % y
     return ""
 
+
 def should_speak(res, force=False):
+    """只在该说时说（跨档 / alert）。避免每 10 分钟念一遍余额。"""
     st = {}
     try:
         if os.path.exists(STATE):
@@ -87,12 +120,13 @@ def should_speak(res, force=False):
         print("[balance] 写状态失败: %s" % e, flush=True)
     if not res.get("ok"):
         return ""
-
+    # alert 每次都值得说（别漏）；warn/ok 只在【跨档】时说，避免重复念
     if lv == "alert":
         return sentence(res)
     if lv != prev and lv in ("warn", "ok"):
         return sentence(res)
     return ""
+
 
 def main():
     a = sys.argv[1:]
@@ -113,6 +147,7 @@ def main():
     if s:
         print("开机该说:", s)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,4 +1,14 @@
 # -*- coding: utf-8 -*-
+"""
+capability.py：按"模型体积 vs 可用显存"给每个本地模型的可行性结论。
+
+判定口径（保守，宁可说"勉强"不说"能跑"）：
+  体积 <= 0.85 × 显存         -> 能直接跑（全进显存）
+  体积 <= 2.5  × 显存         -> 能跑，但要 offload（慢、且占内存）
+  更大                        -> 基本跑不动，建议换量化版（GGUF Q4/Q8）
+
+只读：不发云请求、不改任何配置。
+"""
 import json
 import os
 import re
@@ -7,13 +17,16 @@ import subprocess
 import sys
 import urllib.request
 
-
+# ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW。
+#   ★ 别写错：0x00000200 是 CREATE_NEW_PROCESS_GROUP，不是"不显示窗口"。
+#   父进程没控制台时（pythonw / 计划任务），不加这个起 powershell 就会弹终端。
 CREATE_NO_WINDOW = 0x08000000
 
-
+# FairyX 根目录：由脚本位置推导（tools/ 的上一级）
 HERE = os.path.dirname(os.path.abspath(__file__))
 D = os.path.dirname(HERE)
 CONFIG = os.path.join(D, "config.json")
+
 
 def _load_cfg():
     try:
@@ -22,10 +35,11 @@ def _load_cfg():
     except Exception:
         return {}
 
+
 _CFG = _load_cfg()
 _cpaths = _CFG.get("paths") or {}
 
-
+# ComfyUI 模型目录：优先 config.json paths.comfy_models；否则探测常见位置
 COMFY_MODELS = (_cpaths.get("comfy_models") or
                 [r"C:\ComfyUI\models", r"D:\ComfyUI\models",
                  r"E:\ComfyUI\models", r"F:\ComfyUI\models",
@@ -39,6 +53,7 @@ CATS = ("checkpoints", "diffusion_models", "unet", "loras", "vae", "controlnet",
 SERVICES = [("ComfyUI", 8188), ("IndexTTS 2.5", 9881), ("llama-server", 8080),
             ("Ollama", 11434), ("DSH GUI", 19387)]
 
+
 def _up(port, host="127.0.0.1", t=1.0):
     s = socket.socket()
     s.settimeout(t)
@@ -47,6 +62,7 @@ def _up(port, host="127.0.0.1", t=1.0):
     finally:
         s.close()
 
+
 def _json_get(url, timeout=8):
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
@@ -54,7 +70,9 @@ def _json_get(url, timeout=8):
     except Exception:
         return None
 
+
 def gpu_info():
+    """显存：优先问 ComfyUI 的 /system_stats（它报了真值），兜底用 Win32。"""
     out = {"name": "", "vram_total": 0, "vram_free": 0, "src": ""}
     d = _json_get("http://127.0.0.1:8188/system_stats")
     if d and d.get("devices"):
@@ -64,7 +82,7 @@ def gpu_info():
         out["vram_free"] = int(dev.get("vram_free") or 0)
         out["src"] = "ComfyUI /system_stats"
         return out
-
+    # 兜底：Win32 的 AdapterRAM（>4GB 会失真，只当参考）
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command",
                             "(Get-CimInstance Win32_VideoController | "
@@ -79,6 +97,7 @@ def gpu_info():
     except Exception:
         pass
     return out
+
 
 def sys_info():
     s = {"cpu": "", "cores": 0, "ram_total": 0, "ram_free": 0, "disks": []}
@@ -107,10 +126,13 @@ def sys_info():
         s["err"] = str(e)
     return s
 
+
 def scan_models():
+    """本地模型清单：ComfyUI 各分类 + llama.cpp + Ollama + IndexTTS + Whisper。"""
     res = {"comfy": {}, "gguf_files": [], "ollama": [], "indextts": [], "whisper": []}
-
-
+    # 去重键用 (文件名, 体积) 而不是全路径：
+    #   同一份模型可能被多个分类目录（junction/硬链接）扫到，用路径去重会重复列；
+    #   用名字+体积还能顺手去掉同一文件从不同分类路径被扫到的情况。
     seen = set()
     for base in COMFY_MODELS:
         if not os.path.isdir(base):
@@ -136,20 +158,20 @@ def scan_models():
                         {"name": os.path.relpath(p, d), "size": sz})
                     if x.lower().endswith(".gguf"):
                         res["gguf_files"].append({"name": os.path.relpath(p, d), "size": sz})
-
+    # Ollama
     d = _json_get("http://127.0.0.1:11434/api/tags")
     if d:
         for mm in d.get("models", []):
             res["ollama"].append({"name": mm.get("name"), "size": int(mm.get("size") or 0),
                                   "params": (mm.get("details") or {}).get("parameter_size", "")})
-
+    # IndexTTS（从 config.json 的 paths.indextts_dir 读取；未配置则跳过）
     ck = (_cpaths.get("indextts_dir") or "")
     if ck and os.path.isdir(ck):
         for n in ("gpt.pth", "s2mel.pth", "codec.pth"):
             p = os.path.join(ck, n)
             if os.path.exists(p):
                 res["indextts"].append({"name": n, "size": os.path.getsize(p)})
-
+    # Whisper（相对 FairyX 根目录）
     wd = os.path.join(D, "models", "whisper")
     if os.path.isdir(wd):
         for r, _, fs in os.walk(wd):
@@ -160,7 +182,9 @@ def scan_models():
                                            "size": os.path.getsize(p)})
     return res
 
+
 def verdict(size_bytes, vram_total):
+    """按"体积 vs 显存"给结论。"""
     if not vram_total or not size_bytes:
         return "无法判断"
     gb = size_bytes / 2 ** 30
@@ -171,9 +195,11 @@ def verdict(size_bytes, vram_total):
         return "能跑，但要 offload（慢，且吃内存）"
     return "基本跑不动，建议换量化版（GGUF Q4/Q8）"
 
+
 def quant_of(name):
     m = re.search(r"(q\d[_a-z0-9]*|fp8|fp16|bf16|mxfp8|q4_k_[ms]|q8_0)", name, re.I)
     return m.group(1).upper() if m else ""
+
 
 def report(full=False):
     g = gpu_info()
@@ -192,7 +218,7 @@ def report(full=False):
         L.append("【磁盘】%s 可用 %.0f GB / %.0f GB" % (dev, free / 2 ** 30, tot / 2 ** 30))
     L.append("【后端】" + "  ".join("%s:%s" % (n, "开" if _up(p) else "关") for n, p in SERVICES))
 
-
+    # ---- 关键结论：能跑什么 ----
     L.append("")
     L.append("--- 结论：按显存算，这些能跑 ---")
     big = []
@@ -220,7 +246,7 @@ def report(full=False):
                      % (it["name"], it["size"] / 2 ** 30, it["params"],
                         verdict(it["size"], vram)))
     if mo.get("indextts"):
-        L.append("--- IndexTTS 2.5（语音克隆）---")
+        L.append("--- IndexTTS 2.5（语音克隆，已实测可用）---")
         tot = sum(x["size"] for x in mo["indextts"])
         L.append("   %s  合计 %.2f GB  %s"
                  % (", ".join(x["name"] for x in mo["indextts"]), tot / 2 ** 30,
@@ -235,6 +261,7 @@ def report(full=False):
         for it in mo["gguf_files"][:6]:
             L.append("   %-46s %5.1f GB" % (it["name"][-46:], it["size"] / 2 ** 30))
     return "\n".join(L)
+
 
 if __name__ == "__main__":
     print(report(full="--full" in sys.argv))

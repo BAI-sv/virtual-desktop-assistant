@@ -53,7 +53,7 @@ while (time.time() - t0) < SECS:
     if pk > peak_all:
         peak_all = pk
 
-
+    # --- KWS ---
     kst.accept_waveform(SR, a)
     while sp.is_ready(kst):
         sp.decode_stream(kst)
@@ -64,7 +64,7 @@ while (time.time() - t0) < SECS:
         print("  [%6.1fs] *** KWS HIT #%d : %r ***" % (el, hits, r.strip()), flush=True)
         kst = sp.create_stream()
 
-
+    # --- 存片段 ---
     rms = float(np.sqrt(np.mean(a * a)))
     if state == "idle":
         if rms > 0.002:
