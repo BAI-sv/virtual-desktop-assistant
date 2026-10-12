@@ -440,6 +440,68 @@ def tts_get(text, timeout=120, min_bytes=500):
             "ms": int((time.time() - t_all) * 1000), "tried": tried}
 
 
+# ---------------------------------------------------------------- ★ AI 对话降级中心
+def ask_get(text, history=None, timeout=120):
+    """
+    ★ 本地模型失败后的在线 AI 对话降级中心（ear / ball 共用）：
+       DSH（OpenAI 兼容 chat）-> 豆包（火山方舟，需配置 api_key）。
+    返回 (answer, source) 或 None（全失败）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    msgs = [{"role": "user", "content": text}]
+    if history:
+        for _u, _a in list(history)[-8:]:
+            if _u:
+                msgs.insert(len(msgs) - 1, {"role": "user", "content": _u})
+            if _a:
+                msgs.insert(len(msgs) - 1, {"role": "assistant", "content": _a})
+
+    def _chat(url, payload, headers, to=timeout):
+        req = urllib.request.Request(
+            url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=headers)
+        with urllib.request.urlopen(req, timeout=to) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+
+    # ---- 1) DSH（DeepSeek Harness：POST push 拿同步回复；先探活）----
+    try:
+        if probe(dsh_base() + "/api/fairy/meta", timeout=2.0, ttl=0):
+            _req = urllib.request.Request(
+                dsh_base() + "/api/fairy/push",
+                data=json.dumps({"text": text, "source": "fairy-ear"},
+                                ensure_ascii=False).encode("utf-8"),
+                headers={"content-type": "application/json"})
+            with urllib.request.urlopen(_req, timeout=min(timeout, 90)) as _r:
+                _jd = json.loads(_r.read().decode("utf-8"))
+            if isinstance(_jd, dict) and _jd.get("ok"):
+                _t = str(_jd.get("text") or "").strip()
+                if _t:
+                    return _t, "dsh"
+    except Exception:
+        pass
+
+    # ---- 2) 豆包（火山方舟；fairy.json 配了 api_key 才启用）----
+    try:
+        seg = _cfg().get("online") or {}
+        dou = (seg.get("doubao") or {}) if isinstance(seg, dict) else {}
+        key = (dou.get("api_key") or "").strip() if isinstance(dou, dict) else ""
+        if key:
+            bu = (dou.get("base_url") or
+                  "https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+            mo = dou.get("model") or "doubao-seed-1-6-250615"
+            d2 = _chat(bu, {"model": mo, "messages": msgs, "stream": False},
+                       {"content-type": "application/json",
+                        "authorization": "Bearer " + key}, to=min(timeout, 60))
+            a2 = (d2.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            if a2.strip():
+                return a2.strip(), "doubao"
+    except Exception:
+        pass
+    return None
+
+
 def tts_audio_and_ext(text, timeout=120):
     """
     ★ 给会自行播放音频的组件用（call_translate / work_advisor 等）：

@@ -26,6 +26,8 @@ import sys
 import time
 import urllib.request
 
+import fairy_knowledge as FK  # ★ 软件知识库（核心 800+ 条：名 -> exe/类别/别名）
+
 # ★ 2026-10-10【黑窗】0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）。
 #   父进程没控制台时（pythonw / 计划任务），不加这个起安装器就弹终端。
 CREATE_NO_WINDOW = 0x08000000
@@ -49,6 +51,32 @@ def _cfg():
 # FairyX 根目录：由脚本位置推导（tools/ 的上一级）
 D = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _cpaths = _cfg().get("paths") or {}
+
+# ★ 2026-10-12【中文语音软件库】扫描后保存（名字/别名/功能类别），语音调用直接查
+VOICE_LIB = os.path.join(D, "data", "voice_apps.json")
+CAT_KEYWORDS = [
+    ("浏览器", ["chrome", "edge", "firefox", "浏览器", "夸克", "极速", "opera", "safari"]),
+    ("通讯", ["微信", "wechat", "weixin", "qq", "钉钉", "dingtalk", "telegram",
+              "discord", "飞书", "whatsapp", "slack", "skype"]),
+    ("办公", ["office", "word", "excel", "ppt", "powerpoint", "wps", "文档",
+              "onenote", "outlook", "notion", "obsidian", "koodo", "阅读"]),
+    ("开发", ["code", "studio", "dev", "git", "python", "idea", "android", "flutter",
+              "vscode", "sublime", "node", "java", "docker", "postman", "harness",
+              "strata", "llama"]),
+    ("影音", ["player", "视频", "音乐", "网易云", "qq音乐", "bilibili", "爱奇艺",
+              "potplayer", "vlc", "kmplayer", "网易云音乐", "酷狗", "酷我", "spotify"]),
+    ("下载", ["下载", "idm", "迅雷", "thunder", "aria2", "qbit", "bitcomet"]),
+    ("系统工具", ["everything", "任务", "优化", "clean", "管家", "360", "geek",
+                  "uninstall", "hi", "bit", "driver", "驱动", "鲁大师", "revo"]),
+    ("图像", ["photoshop", "ps", "画图", "图片", "截图", "snipaste", "paint",
+              "lightroom", "美图", "gimp"]),
+    ("AI", ["ollama", "deepseek", "豆包", "doubao", "gpt", "ai", "dash", "comfyui",
+            "sherpa", "whisper", "funasr", "index", "tts"]),
+    ("游戏", ["steam", "wegame", "游戏", "wargaming", "坦克", "lol", "epic", "origin",
+              "加速", "加速器"]),
+    ("安全", ["杀毒", "安全", "火绒", "360安全", "defender", "malware", "avast"]),
+    ("输入法", ["输入法", "搜狗", "百度输入", "讯飞", "sogou"]),
+]
 
 
 def consent_ok(kind):
@@ -265,6 +293,11 @@ def scan_catalog():
                 lack_txt += "（可自动下载: %s）" % "、".join(dl)
         lines.append("【%s%s】%s%s" % (star, cat, st, lack_txt))
         missing.append((cat, lack))
+    # ★ 2026-10-12：扫描后自动建立/更新中文语音软件库（语音调用直接查）
+    try:
+        build_voice_lib()
+    except Exception:
+        pass
     return "\n".join(lines), missing
 
 
@@ -614,6 +647,480 @@ def open_portable(name_part):
         return "已启动绿色软件: %s" % os.path.basename(p)
     except Exception as e:
         return "启动失败: %s" % e
+
+
+# --------------------------------------------------------------------------
+# ★ 2026-10-12【打开 XX 多级递推】系统对象 -> 内置目录 -> 开始菜单 ->
+#   Everything 全盘 -> 绿色软件。逐级扩展匹配范围，命中即启动。
+# --------------------------------------------------------------------------
+# 系统特殊对象（"打开电脑/回收站/设置"这类不是软件，先认出来）
+SPECIAL_OPEN = {
+    "电脑": "shell:MyComputerFolder",
+    "此电脑": "shell:MyComputerFolder",
+    "我的电脑": "shell:MyComputerFolder",
+    "回收站": "shell:RecycleBinFolder",
+    "控制面板": "shell:ControlPanelFolder",
+    "网络": "shell:NetworkPlacesFolder",
+    "文档": "shell:Personal",
+    "下载": "shell:Downloads",
+    "桌面": "shell:Desktop",
+    "图片": "shell:MyPictures",
+    "音乐": "shell:MyMusic",
+    "视频": "shell:MyVideos",
+    "设置": "ms-settings:",
+}
+
+# ★ 2026-10-12【设备语音路由】"打开摄像头/蓝牙/打印机/声音" -> 设备或对应设置页
+DEVICE_OPEN = {
+    "摄像头": "microsoft.windows.camera:",
+    "相机": "microsoft.windows.camera:",
+    "蓝牙": "ms-settings:bluetooth",
+    "wifi": "ms-settings:wifi",
+    "无线网络": "ms-settings:wifi",
+    "网络设置": "ms-settings:network",
+    "打印机": "ms-settings:printers",
+    "扫描仪": "ms-settings:printers",
+    "声音": "ms-settings:sound",
+    "音量": "ms-settings:sound",
+    "音频": "ms-settings:sound",
+    "显示器": "ms-settings:display",
+    "屏幕": "ms-settings:display",
+    "设备管理器": "devmgmt.msc",
+    "设备": "devmgmt.msc",
+    "usb": "ms-settings:usb",
+    "鼠标": "ms-settings:mousetouchpad",
+    "键盘": "ms-settings:keyboard",
+    "触摸板": "ms-settings:mousetouchpad",
+    "电源": "ms-settings:power",
+    "电池": "ms-settings:power",
+    "存储": "ms-settings:storagesense",
+    "应用和功能": "ms-settings:appsfeatures",
+    "应用": "ms-settings:appsfeatures",
+    "任务栏": "ms-settings:taskbar",
+    "开始菜单": "ms-settings:personalization-start",
+    "壁纸": "ms-settings:personalization-background",
+    "主题": "ms-settings:themes",
+    "锁屏": "ms-settings:lockscreen",
+    "通知": "ms-settings:notifications",
+    "投影": "ms-settings:project",
+    "多任务": "ms-settings:multitasking",
+    "共享": "ms-settings:shared-experiences",
+    "剪贴板": "ms-settings:clipboard",
+    "日期和时间": "ms-settings:dateandtime",
+    "语言": "ms-settings:keyboard",
+    "区域": "ms-settings:regionformatting",
+    "辅助功能": "ms-settings:easeofaccess",
+    "语音识别": "ms-settings:speech",
+    "游戏设置": "ms-settings:gaming",
+    "开发者选项": "ms-settings:developers",
+    "默认应用": "ms-settings:defaultapps",
+    "账户": "ms-settings:accounts",
+    "登录选项": "ms-settings:signinoptions",
+    "windows更新": "ms-settings:windowsupdate",
+    "系统更新": "ms-settings:windowsupdate",
+    "安全中心": "ms-settings:windowssecurity",
+}
+def _startmenu_lnks():
+    """收集开始菜单快捷方式：[(显示名, lnk 路径)]（用户可见的软件名最直观）。"""
+    out = []
+    dirs = [os.path.join(os.environ.get("APPDATA", ""),
+                         r"Microsoft\Windows\Start Menu\Programs"),
+            os.path.join(os.environ.get("PROGRAMDATA", ""),
+                         r"Microsoft\Windows\Start Menu\Programs")]
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for root, _, files in os.walk(d):
+                for f in files:
+                    if f.lower().endswith(".lnk"):
+                        out.append((os.path.splitext(f)[0].strip(),
+                                    os.path.join(root, f)))
+        except Exception:
+            continue
+    return out
+
+
+def _es_find(name):
+    """用 Everything 命令行（es.exe / everything.exe）全盘找 exe；返回第一个路径或 None。"""
+    es = None
+    for cand in (os.path.join(D, "everything", "es.exe"),
+                 os.path.join(D, "everything", "everything.exe")):
+        if os.path.exists(cand):
+            es = cand
+            break
+    if not es:
+        return None
+    try:
+        r = subprocess.run([es, "-path-part", "-ext", "exe", name],
+                           capture_output=True, text=True, timeout=8)
+        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+        return lines[0] if lines else None
+    except Exception:
+        return None
+
+
+def _installed_with_exe():
+    """注册表已装软件 -> {显示名: exe 路径}（DisplayIcon / UninstallString / InstallLocation 解析）。"""
+    import winreg
+    out = {}
+    roots = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+             (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")]
+    for hkey, path in roots:
+        try:
+            k = winreg.OpenKey(hkey, path)
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(k, i)
+                    i += 1
+                    try:
+                        sk = winreg.OpenKey(k, sub)
+                        try:
+                            nm = None
+                            exe = None
+                            try:
+                                nm, _ = winreg.QueryValueEx(sk, "DisplayName")
+                            except OSError:
+                                pass
+                            for field in ("DisplayIcon", "UninstallString", "InstallLocation"):
+                                try:
+                                    v, _ = winreg.QueryValueEx(sk, field)
+                                except OSError:
+                                    continue
+                                if not v:
+                                    continue
+                                cand = str(v).split(",")[0].strip().strip('"')
+                                if cand.lower().endswith(".exe") and os.path.exists(cand):
+                                    exe = cand
+                                    break
+                            if nm and len(nm) < 60 and exe:
+                                out[nm.strip()] = exe
+                        finally:
+                            sk.Close()
+                    except OSError:
+                        pass
+                except OSError:
+                    break
+            k.Close()
+        except OSError:
+            pass
+    return out
+
+
+def open_smart(text):
+    """打开软件多级递推：系统对象 -> 内置目录 -> 开始菜单 -> 注册表 -> Everything -> 绿色软件。
+    命中即启动，返回给用户的播报文本。已装软件优先用系统默认方式，没装才自动下载。"""
+    t = (text or "").strip().lower()
+    if not t:
+        return "请告诉我要打开什么软件"
+    # 级 0：系统特殊对象（电脑/回收站/设置等）
+    for _k, _sh in SPECIAL_OPEN.items():
+        if _k in text:
+            try:
+                os.startfile(_sh)
+                return "已打开：" + _k
+            except Exception:
+                continue
+    # 级 0.4：设备路由（摄像头/蓝牙/打印机/声音/显示器/设备管理器等）
+    for _k, _uri in DEVICE_OPEN.items():
+        if _k in text:
+            try:
+                os.startfile(_uri)
+                return "已打开：" + _k
+            except Exception:
+                continue
+    # 级 0.2：智能家居控制（打开灯/空调/窗帘/扫地机等 -> smart_home 桥）
+    try:
+        import smart_home
+        _sr = smart_home.control(text)
+        if _sr:
+            return _sr
+    except Exception:
+        pass
+    # 级 0.5：中文语音软件库（扫描后保存，本机已装，路径精确）
+    for _nm, _info in load_voice_lib().items():
+        if (t in _nm.lower()
+                or any(t in _a.lower() for _a in _info.get("aliases", []))):
+            try:
+                os.startfile(_info["path"])
+                return "已打开：" + _nm
+            except Exception:
+                continue
+    # 级 0.6：软件知识库（全网常用软件字典：名字命中 -> exe -> 本机找）
+    for _nm, _info in load_knowledge().items():
+        if (t in _nm.lower()
+                or any(t in _a.lower() for _a in _info.get("aliases", []))):
+            _p = _find_exe_on_pc(_info.get("exe", ""))
+            if _p:
+                try:
+                    os.startfile(_p)
+                    return "已打开：" + _nm
+                except Exception:
+                    continue
+            return "本机没有安装" + _nm + "，可以先让我下载安装"
+    # 级 1：内置目录（强特征词/工具名/类别）—— exe 已装才直接开，没装先看系统里有没有同款
+    _fallback_install = None
+    hit = find_by_text(t)
+    if hit:
+        if _detect_exe(hit):
+            r = open_app(hit)
+            if "失败" not in r:
+                return "已打开：" + hit
+        else:
+            _fallback_install = hit
+    # 级 2：开始菜单快捷方式（用户可见软件名，最直观）
+    for nm, lnk in _startmenu_lnks():
+        if t in nm.lower() or nm.lower() in t:
+            try:
+                os.startfile(lnk)
+                return "已打开：" + nm
+            except Exception:
+                continue
+    # 级 3：注册表已装软件（DisplayIcon / UninstallString 解析 exe）
+    for nm, exe in _installed_with_exe().items():
+        if t in nm.lower() or nm.lower() in t:
+            try:
+                os.startfile(exe)
+                return "已打开：" + nm
+            except Exception:
+                continue
+    # 级 4：Everything 全盘 exe（有 es.exe 时）
+    exe = _es_find(t)
+    if exe:
+        try:
+            os.startfile(exe)
+            return "已打开：" + os.path.basename(exe)
+        except Exception:
+            pass
+    # 级 5：绿色软件（免安装单文件）
+    r = open_portable(t)
+    if not r.startswith("没有找到"):
+        return r
+    # 级 6：内置目录命中但没装 -> 自动下载安装（兜底）
+    if _fallback_install:
+        r = open_app(_fallback_install)
+        if "失败" not in r:
+            return "已打开：" + _fallback_install
+    return "没有找到软件：" + text
+
+
+# --------------------------------------------------------------------------
+# ★ 2026-10-12【中文语音软件库】扫描已装 -> 分类 -> 保存；语音调用直接查
+# --------------------------------------------------------------------------
+def _classify(name):
+    """按关键词给软件归类；未知返回"其他"。"""
+    n = name.lower()
+    for cat, kws in CAT_KEYWORDS:
+        if any(k in n for k in kws):
+            return cat
+    return "其他"
+
+
+def build_voice_lib():
+    """扫描已装软件 -> 中文语音软件库（显示名/别名/功能类别/路径），保存 JSON。
+    以后语音"打开 XX"直接查这个库，又快又准；开机扫描后自动调用。"""
+    lib = {}
+    # ① 开始菜单快捷方式
+    for nm, lnk in _startmenu_lnks():
+        if nm not in lib:
+            lib[nm] = {"path": lnk, "cat": _classify(nm), "aliases": []}
+    # ② 注册表已装（DisplayIcon 解析 exe）
+    for nm, exe in _installed_with_exe().items():
+        if nm not in lib:
+            lib[nm] = {"path": exe, "cat": _classify(nm), "aliases": []}
+    # ③ 内置目录（补精确类别 + 别名）
+    for name, info in APP_CATALOG.items():
+        exe = _detect_exe(name)
+        if name not in lib:
+            if exe:
+                lib[name] = {"path": exe, "cat": info.get("cat", _classify(name)),
+                             "aliases": list(info.get("win", []))}
+        else:
+            lib[name]["cat"] = info.get("cat", lib[name].get("cat", "其他"))
+            _als = list(set(lib[name].get("aliases", []) + info.get("win", [])))
+            lib[name]["aliases"] = _als
+    # ④ 软件知识库（补类别 + 别名，让已装软件带知识库的丰富信息）
+    try:
+        for name, info in load_knowledge().items():
+            if name in lib:
+                if not lib[name].get("cat") or lib[name]["cat"] == "其他":
+                    lib[name]["cat"] = info.get("cat", "其他")
+                _als = list(set(lib[name].get("aliases", [])
+                                + info.get("aliases", [])))
+                lib[name]["aliases"] = _als
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(VOICE_LIB), exist_ok=True)
+        with open(VOICE_LIB, "w", encoding="utf-8") as f:
+            json.dump(lib, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        return "语音库保存失败: %s" % e
+    return "语音软件库已建立：%d 个软件，保存到 data/voice_apps.json" % len(lib)
+
+
+def load_voice_lib():
+    """读中文语音软件库；没有就返回空。"""
+    try:
+        with open(VOICE_LIB, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+# --------------------------------------------------------------------------
+# ★ 2026-10-12【软件知识库】全网常用软件字典（名 -> exe/类别/别名）
+#   语音"打开 XX"：先语音库（本机已装）-> 知识库（名字命中 -> exe -> 本机找）
+# --------------------------------------------------------------------------
+KNOWLEDGE_FILE = os.path.join(D, "data", "app_knowledge.json")
+
+
+def build_knowledge():
+    """核心 KNOWN（800+ 条）-> data/app_knowledge.json；扫描后随语音库一起更新。"""
+    lib = {}
+    for nm, exe, cat, aliases in FK.KNOWN:
+        lib[nm] = {"exe": exe, "cat": cat,
+                   "aliases": aliases.split(";") if aliases else []}
+    try:
+        os.makedirs(os.path.dirname(KNOWLEDGE_FILE), exist_ok=True)
+        with open(KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(lib, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        return "知识库保存失败: %s" % e
+    return "软件知识库已建立：%d 条" % len(lib)
+
+
+def load_knowledge():
+    """读软件知识库；没有就返回空。"""
+    try:
+        with open(KNOWLEDGE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _find_exe_on_pc(exe):
+    """在已装软件里按 exe 文件名找完整路径（注册表 + 开始菜单 lnk 目标）。"""
+    if not exe:
+        return None
+    e = exe.lower()
+    try:
+        for _nm, _p in _installed_with_exe().items():
+            if _p and _p.lower().endswith(e):
+                return _p
+    except Exception:
+        pass
+    try:
+        import win32com.client
+        for _nm, _lnk in _startmenu_lnks():
+            try:
+                sh = win32com.client.Dispatch("WScript.Shell")
+                tgt = sh.CreateShortcut(_lnk).TargetPath or ""
+                if tgt.lower().endswith(e):
+                    return tgt
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+# --------------------------------------------------------------------------
+# ★ 2026-10-12【关闭 XX 多级递推】进程名 -> 窗口标题(WM_CLOSE) -> taskkill 兜底
+# --------------------------------------------------------------------------
+def _kill_proc(proc):
+    """按进程名优雅终止（先温和请求，失败再强杀）。成功返回 True。"""
+    if not proc:
+        return False
+    try:
+        r = subprocess.run(["taskkill", "/IM", proc, "/T"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return True
+        r2 = subprocess.run(["taskkill", "/IM", proc, "/F", "/T"],
+                            capture_output=True, text=True, timeout=15)
+        return r2.returncode == 0
+    except Exception:
+        return False
+
+
+def _close_window_by_title(part):
+    """按窗口标题发 WM_CLOSE（优雅关窗，可保存数据）。成功返回 True。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    found = []
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _cb(hwnd, _):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0 or n > 300:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if part.lower() in buf.value.lower():
+                found.append(hwnd)
+        except Exception:
+            pass
+        return True
+    user32.EnumWindows(_cb, 0)
+    if not found:
+        return False
+    for hwnd in found[:3]:
+        try:
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)   # WM_CLOSE
+        except Exception:
+            pass
+    return True
+
+
+def _running_procs(name):
+    """列出当前运行、名字含 name 的进程名。"""
+    try:
+        r = subprocess.run(["tasklist", "/fo", "csv", "/nh"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    procs = set()
+    for line in r.stdout.splitlines():
+        parts = line.split(",")
+        if not parts:
+            continue
+        p = parts[0].strip().strip('"')
+        if name.lower() in p.lower():
+            procs.add(p)
+    return sorted(procs)
+
+
+def close_smart(text):
+    """关闭软件/窗口多级递推：内置目录进程名 -> 窗口标题 -> 注册表已装 -> 运行进程。
+    命中即关，返回给用户的播报文本。"""
+    t = (text or "").strip().lower()
+    if not t:
+        return "请告诉我要关闭什么"
+    # 级 1：内置目录（APP_CATALOG 名/别名 -> exe 进程名）
+    for name, info in APP_CATALOG.items():
+        if name.lower() in t or any(w in t for w in info["win"]):
+            for exe in info["exe"]:
+                proc = os.path.basename(exe)
+                if _kill_proc(proc):
+                    return "已关闭：" + name
+    # 级 2：窗口标题（优雅 WM_CLOSE，可保存数据）
+    if _close_window_by_title(t):
+        return "已关闭窗口：" + t
+    # 级 3：注册表已装（DisplayIcon 解析 exe 进程名）
+    for nm, exe in _installed_with_exe().items():
+        if t in nm.lower() or nm.lower() in t:
+            if _kill_proc(os.path.basename(exe)):
+                return "已关闭：" + nm
+    # 级 4：运行进程名模糊（taskkill）
+    for p in _running_procs(t):
+        if _kill_proc(p):
+            return "已关闭：" + p
+    return "没有找到要关闭的软件：" + text
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@
 - 视觉 / 设备 / 语音播报接入球右键菜单
 
 ### 修复
-- **消除全部本机硬编码路径**（`D:\FAIRY` / `C:\Users\Administrator` 共 20 余处）：
+- **消除全部本机硬编码路径**（本机项目根 / 用户目录，共 20 余处）：
   一律改为「环境变量优先 ＋ 基于 `__file__` 自动推导」，换机器无需改代码即可运行
 - **补齐 `requirements.txt` 可选依赖**：rapidocr / ultralytics / imageio-ffmpeg / pydub /
   pycaw / pyperclip / comtypes（均为函数内惰性导入，不装只少对应功能，不影响主体运行）

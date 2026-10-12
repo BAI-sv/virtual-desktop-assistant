@@ -42,6 +42,20 @@ DEFAULTS = {
     "rss": ["https://www.chinanews.com.cn/rss/scroll-news.xml"],
 }
 
+# ★ 2026-10-11【今日节日/节气】公历固定节日表 + 节气近似表（认不出就不报）
+FESTIVALS = {
+    "01-01": "元旦", "02-14": "情人节", "03-08": "妇女节", "03-12": "植树节",
+    "04-01": "愚人节", "05-01": "劳动节", "05-04": "青年节", "06-01": "儿童节",
+    "07-01": "建党节", "08-01": "建军节", "09-10": "教师节", "10-01": "国庆节",
+    "12-24": "平安夜", "12-25": "圣诞节",
+    "01-05": "小寒", "01-20": "大寒", "02-04": "立春", "02-19": "雨水",
+    "03-05": "惊蛰", "03-20": "春分", "04-05": "清明", "04-20": "谷雨",
+    "05-05": "立夏", "05-21": "小满", "06-06": "芒种", "06-21": "夏至",
+    "07-07": "小暑", "07-23": "大暑", "08-07": "立秋", "08-23": "处暑",
+    "09-07": "白露", "09-23": "秋分", "10-08": "寒露", "10-23": "霜降",
+    "11-07": "立冬", "11-22": "小雪", "12-07": "大雪", "12-22": "冬至",
+}
+
 # wttr.in 的天气描述是英文，常见的那几个翻一下（翻不到就原样念）
 WEATHER_ZH = {
     "sunny": "晴", "clear": "晴", "partly cloudy": "多云", "cloudy": "阴",
@@ -571,117 +585,209 @@ def boot_lines():
 def build(cfg=None):
     """生成播报句子列表（每句一条，方便逐句播）。"""
     cfg = cfg or _load_conf()
+    # ★ 2026-10-11【启动播报内容选择】fairy.json 的 briefing 段可逐项开关：
+    #   time/location/weather/dress/news/status/devices，缺省全部播报。
+    _seg = {}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "fairy.json"), encoding="utf-8") as _f:
+            _seg = json.load(_f).get("briefing") or {}
+    except Exception:
+        pass
     lines = []
 
     # 1) 时间
-    now = time.localtime()
-    wd = "一二三四五六日"[now.tm_wday]
-    hour = now.tm_hour
-    greet = ("凌晨了" if hour < 5 else "早上好" if hour < 11 else
-             "中午好" if hour < 13 else "下午好" if hour < 18 else
-             "晚上好" if hour < 23 else "夜深了")
-    lines.append("主人，%s。现在是 %d 年 %d 月 %d 日，星期%s，%02d 点 %02d 分。"
-                 % (greet, now.tm_year, now.tm_mon, now.tm_mday, wd, hour, now.tm_min))
+    if _seg.get("time", True):
+        now = time.localtime()
+        wd = "一二三四五六日"[now.tm_wday]
+        hour = now.tm_hour
+        greet = ("凌晨了" if hour < 5 else "早上好" if hour < 11 else
+                 "中午好" if hour < 13 else "下午好" if hour < 18 else
+                 "晚上好" if hour < 23 else "夜深了")
+        lines.append("主人，%s。现在是 %d 年 %d 月 %d 日，星期%s，%02d 点 %02d 分。"
+                     % (greet, now.tm_year, now.tm_mon, now.tm_mday, wd, hour, now.tm_min))
+
+    # 1.5) ★ 2026-10-11 Fairy 功能状态（服务在线情况 + 已连接设备数）
+    if _seg.get("status", True):
+        try:
+            _tips = []
+            for _port, _nm in ((9881, "语音"), (8085, "视觉"),
+                               (11434, "本地大脑"), (19388, "核心服务")):
+                try:
+                    import socket
+                    _s = socket.create_connection(("127.0.0.1", _port), timeout=0.3)
+                    _s.close()
+                    _tips.append(_nm)
+                except Exception:
+                    pass
+            if _tips:
+                lines.append("Fairy 已就绪：%s在线。" % "、".join(_tips))
+        except Exception:
+            pass
+    if _seg.get("devices", True):
+        try:
+            import json as _json
+            _devs = (_json.load(open(os.path.join(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))), "fairy.json"),
+                encoding="utf-8")).get("devices") or [])
+            if _devs:
+                lines.append("已连接 %d 个设备。" % len(_devs))
+        except Exception:
+            pass
+
+    # 1.6) 今日节日/节气（内置公历节日表 + 节气近似表，认不出就不报）
+    if _seg.get("holiday", True):
+        try:
+            _md = time.strftime("%m-%d")
+            _h = FESTIVALS.get(_md)
+            if _h:
+                lines.append("今天是%s。" % _h)
+        except Exception:
+            pass
+
+    # 1.7) 今日待办（有待办才报：数量 + 最近一件）
+    if _seg.get("todo", True):
+        try:
+            _td = (json.load(open(os.path.join(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))), "data", "todo.json"),
+                encoding="utf-8")) or [])
+            _pend = [x for x in _td if not x.get("done")]
+            if _pend:
+                _first = _pend[0].get("text", "")
+                _with_at = any(x.get("at") for x in _pend)
+                lines.append("今天有 %d 件待办%s，最近一件：%s。"
+                             % (len(_pend), "，其中 %d 件定了时间" % sum(
+                                 1 for x in _pend if x.get("at")) if _with_at else "",
+                                _first))
+        except Exception:
+            pass
+
+    # 1.8) 网络状态（快速探测外网，失败也不报错）
+    if _seg.get("network", True):
+        try:
+            import socket as _sock
+            _s = _sock.create_connection(("223.5.5.5", 53), timeout=1.5)
+            _s.close()
+            lines.append("网络正常。")
+        except Exception:
+            lines.append("网络当前不通，可能需要检查路由器。")
+
+    # 1.9) 电量（仅笔记本等有电池的设备才报）
+    if _seg.get("battery", True):
+        try:
+            import subprocess as _sp
+            _r = _sp.run(["wmic", "path", "Win32_Battery", "get",
+                          "EstimatedChargeRemaining"], capture_output=True, timeout=5,
+                         creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+            _t = (_r.stdout or b"").decode("utf-8", "replace")
+            _pct = [x.strip() for x in _t.splitlines() if x.strip().isdigit()]
+            if _pct:
+                lines.append("电量剩余 %s%%。" % _pct[0])
+        except Exception:
+            pass
 
     # 2) 位置
     city, need_confirm = resolves_city(cfg)
     lat = lon = None
-    if city:
+    if city and _seg.get("location", True):
         lines.append("检测到当前位置是%s。" % city)
         if need_confirm:
             lines.append("如果我定位错了，请在球上右键选「位置」改一下。")
 
     # 3) 天气
     # 优先用配置里存好的经纬度；没有就用城市名地理编码（比让 wttr 猜准）
-    if lat is None and lon is None:
-        if cfg.get("lat") and cfg.get("lon"):
-            lat, lon = cfg.get("lat"), cfg.get("lon")
-        elif city:
-            lat, lon = geocode(city)
-    w = None
-    # ★★ 2026-10-10：未来三天【单独一路源】—— open-meteo 的每日预报带"下雨/下雪"。
-    # 两路并发抓，省掉一个来回的等待（顺序抓实测要 4.7 秒，并发 ~2.5 秒）。
-    _fc = []
-    try:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=1) as _ex:
-            _fut = _ex.submit(daily_forecast, lat, lon, 3)
+    if _seg.get("weather", True):
+        if lat is None and lon is None:
+            if cfg.get("lat") and cfg.get("lon"):
+                lat, lon = cfg.get("lat"), cfg.get("lon")
+            elif city:
+                lat, lon = geocode(city)
+        w = None
+        # ★★ 2026-10-10：未来三天【单独一路源】—— open-meteo 的每日预报带"下雨/下雪"。
+        # 两路并发抓，省掉一个来回的等待（顺序抓实测要 4.7 秒，并发 ~2.5 秒）。
+        _fc = []
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as _ex:
+                _fut = _ex.submit(daily_forecast, lat, lon, 3)
+                w = get_weather(city, lat, lon)
+                _fc = _fut.result(timeout=20) or []
+        except Exception as _e:
+            print("[briefing] 并发取天气失败，退回顺序取: %s: %s"
+                  % (type(_e).__name__, str(_e)[:60]), flush=True)
             w = get_weather(city, lat, lon)
-            _fc = _fut.result(timeout=20) or []
-    except Exception as _e:
-        print("[briefing] 并发取天气失败，退回顺序取: %s: %s"
-              % (type(_e).__name__, str(_e)[:60]), flush=True)
-        w = get_weather(city, lat, lon)
-        _fc = daily_forecast(lat, lon, 3) or []
-    if w:
-        n = w["now"]
-        lines.append("现在室外 %s 度，体感 %s 度，%s，湿度 %s%%，风速 %s 公里每小时。"
-                     % (n["temp"], n["feel"], n["desc"] or "天气未知", n["humidity"], n["wind"]))
-        # ★★ 未来三天：温度 + 下雨/下雪（直接说人话）
-        # 甲 = open-meteo（带降水类型）；乙 = wttr（只有温度，兜底）
-        _jia = []
-        for _d in _fc:
-            _jia.append({"称呼": day_name(_d.get("date")), "最低": _d.get("min"),
-                         "最高": _d.get("max"), "天气": _d.get("desc") or "",
-                         "降水": _d.get("precip") or ""})
-        _yi = []
-        for _d in (w.get("days") or []):
-            _yi.append({"称呼": day_name(_d.get("date")), "最低": _d.get("min"),
-                        "最高": _d.get("max")})
-        _m = _cnsh_logic()                      # ★ 纯逻辑走 fairy_logic.py
-        _sent = ""
-        if _m is not None and hasattr(_m, "三天天气句"):
-            try:
-                _sent = _m.三天天气句(_jia, _yi)
-            except Exception as _e:
-                print("[briefing] fairy_logic.三天天气句 失败，退回本文件拼: %s: %s"
-                      % (type(_e).__name__, _e), flush=True)
-                _sent = ""
-        if not _sent:
-            seg = []
-            for d in (_jia or _yi):
-                seg.append("%s %s 到 %s 度" % (d.get("称呼") or "", d.get("最低"), d.get("最高")))
-            if seg:
-                _sent = "未来三天：" + "；".join(seg) + "。"
-        if _sent:
-            lines.append(_sent)
-        lines.append("穿衣建议：" + clothing_advice(n["temp"]) + "。")
-    else:
-        lines.append("天气没能取到，这次就不猜了。")
+            _fc = daily_forecast(lat, lon, 3) or []
+        if w:
+            n = w["now"]
+            lines.append("现在室外 %s 度，体感 %s 度，%s，湿度 %s%%，风速 %s 公里每小时。"
+                         % (n["temp"], n["feel"], n["desc"] or "天气未知", n["humidity"], n["wind"]))
+            # ★★ 未来三天：温度 + 下雨/下雪（直接说人话）
+            # 甲 = open-meteo（带降水类型）；乙 = wttr（只有温度，兜底）
+            _jia = []
+            for _d in _fc:
+                _jia.append({"称呼": day_name(_d.get("date")), "最低": _d.get("min"),
+                             "最高": _d.get("max"), "天气": _d.get("desc") or "",
+                             "降水": _d.get("precip") or ""})
+            _yi = []
+            for _d in (w.get("days") or []):
+                _yi.append({"称呼": day_name(_d.get("date")), "最低": _d.get("min"),
+                            "最高": _d.get("max")})
+            _m = _cnsh_logic()                      # ★ 纯逻辑走 fairy_logic.py
+            _sent = ""
+            if _m is not None and hasattr(_m, "三天天气句"):
+                try:
+                    _sent = _m.三天天气句(_jia, _yi)
+                except Exception as _e:
+                    print("[briefing] fairy_logic.三天天气句 失败，退回本文件拼: %s: %s"
+                          % (type(_e).__name__, _e), flush=True)
+                    _sent = ""
+            if not _sent:
+                seg = []
+                for d in (_jia or _yi):
+                    seg.append("%s %s 到 %s 度" % (d.get("称呼") or "", d.get("最低"), d.get("最高")))
+                if seg:
+                    _sent = "未来三天：" + "；".join(seg) + "。"
+            if _sent:
+                lines.append(_sent)
+            if _seg.get("dress", True):
+                lines.append("穿衣建议：" + clothing_advice(n["temp"]) + "。")
+        else:
+            lines.append("天气没能取到，这次就不猜了。")
 
     # 4) 新闻
     # news_count=0 时【连抓都不抓】，
     # 省掉 RSS 请求（开机更快），想看时用 `--news` 单独取。
-    _want_news = int(cfg.get("news_count") or 0) > 0
-    news = get_news(cfg) if _want_news else []
-    if not _want_news:
-        pass          # 用户要求：开机不报新闻（连"取不到"都不说），等他想看时问我
-    elif news:
-        # 【为什么精简】用户反馈"新闻太多了"—— 8 条完整标题念出来要一分多钟。
-        # 所以：声音只念少量 + 每条截断；完整列表照样进屏幕浮窗和文件（不丢信息）。
-        lim = int(cfg.get("headline_max_chars") or 26)
+    if _seg.get("news", True):
+        _want_news = int(cfg.get("news_count") or 0) > 0
+        news = get_news(cfg) if _want_news else []
+        if not _want_news:
+            pass          # 用户要求：开机不报新闻（连"取不到"都不说），等他想看时问我
+        elif news:
+            # 【为什么精简】用户反馈"新闻太多了"—— 8 条完整标题念出来要一分多钟。
+            # 所以：声音只念少量 + 每条截断；完整列表照样进屏幕浮窗和文件（不丢信息）。
+            lim = int(cfg.get("headline_max_chars") or 26)
 
-        def short(x):
-            x = str(x).strip()
-            return x if len(x) <= lim else x[:lim].rstrip("，,。.、：: ") + "…"
+            def short(x):
+                x = str(x).strip()
+                return x if len(x) <= lim else x[:lim].rstrip("，,。.、：: ") + "…"
 
-        k = int(cfg.get("news_count") or 2)
-        # 【修措辞】原来硬编码"先说两条"，k=1 时数字对不上。改成按实际条数说。
-        lines.append("今日要闻：" if k != 2 else "今日要闻两条：")
-        for t in news[:k]:
-            lines.append(short(t))
-        kws = [x for x in (cfg.get("keywords") or []) if x]
-        if kws:
-            hit = [t for t in news if any(w0.lower() in t.lower() for w0 in kws)]
-            if hit:
-                kk = int(cfg.get("keyword_news_count") or 2)
-                lines.append("你关心的%s有 %d 条：" % ("、".join(kws[:2]), len(hit)))
-                for t in hit[:kk]:
-                    lines.append(short(t))
-            else:
-                lines.append("今天暂时没有和你关注的关键词对上的新闻。")
-    else:
-        lines.append("新闻源这次没取到。")
+            k = int(cfg.get("news_count") or 2)
+            # 【修措辞】原来硬编码"先说两条"，k=1 时数字对不上。改成按实际条数说。
+            lines.append("今日要闻：" if k != 2 else "今日要闻两条：")
+            for t in news[:k]:
+                lines.append(short(t))
+            kws = [x for x in (cfg.get("keywords") or []) if x]
+            if kws:
+                hit = [t for t in news if any(w0.lower() in t.lower() for w0 in kws)]
+                if hit:
+                    kk = int(cfg.get("keyword_news_count") or 2)
+                    lines.append("你关心的%s有 %d 条：" % ("、".join(kws[:2]), len(hit)))
+                    for t in hit[:kk]:
+                        lines.append(short(t))
+                else:
+                    lines.append("今天暂时没有和你关注的关键词对上的新闻。")
+        else:
+            lines.append("新闻源这次没取到。")
 
     # CPU/硬件稳定性（WHEA 缓存错误 + 意外关机的新增量）
     lines.extend(hw_lines())
