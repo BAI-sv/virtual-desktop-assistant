@@ -40,6 +40,9 @@ __pycache__/
 desktop.ini
 Thumbs.db
 
+# 外部二进制（第三方工具，不随仓库分发）
+tools/bin/
+
 # 测试输出
 tools/*.txt
 data/*.txt
