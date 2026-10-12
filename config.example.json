@@ -136,6 +136,15 @@
     "position_x": 180,
     "position_y": 180
   },
+  "smart_home": {
+    "enabled": false,
+    "ha": {
+      "url": "",
+      "token": "",
+      "entities": {}
+    },
+    "note": "智能家居控制：默认关闭（暂时不连接）。需要时把 enabled 设为 true，并按需配置 ha（Home Assistant 地址/token）或 miio（米家直连）"
+  },
   "safety": {
     "confirm_dangerous": true
   },

@@ -1,17 +1,18 @@
 """Fairy 视觉引擎启动器：llama-server（Vulkan）跑 Qwen3-VL-8B，端口 8085。
 
 被 fairy.py 的 vl 组件调用；8085 已在监听时自动跳过。
-底层是 llama.cpp Vulkan 后端（AMD 9070 XT 实测 GPU 加速，看图 0.6 秒）。
-模型文件：F 盘 ComfyUI 模型库（Qwen3-VL-8B Q4_K_M + mmproj Q8_0）。
+底层是 llama.cpp Vulkan 后端（A 卡实测 GPU 加速，看图约 0.6 秒）。
+模型文件：Qwen3-VL-8B Q4_K_M + mmproj Q8_0（路径见下方配置）。
 """
 import os
 import socket
 import subprocess
 import sys
 
-LLAMA = r"D:\NAI-xiao\llama.cpp\vulkan-qwen3.8-27B\llama-b10839-bin-win-vulkan-x64\llama-server.exe"
-MODEL = r"F:\ComfyUI模型\models\LLM\Huihui-Qwen3-VL-8B-Instruct-abliterated.Q4_K_M.gguf"
-MMPROJ = r"F:\ComfyUI模型\models\LLM\Huihui-Qwen3-VL-8B-Instruct-abliterated.mmproj-Q8_0.gguf"
+# 本机路径请在下方配置（或改从 config.json 的 paths 读取）：
+LLAMA = r"<llama.cpp 目录>\llama-server.exe"
+MODEL = r"<Qwen3-VL-8B 模型 GGUF 路径>"
+MMPROJ = r"<Qwen3-VL-8B mmproj 路径>"
 PORT = 8085
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fairy_vl.log")
 

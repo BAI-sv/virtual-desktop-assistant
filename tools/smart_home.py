@@ -3,29 +3,21 @@
 =====================
 语音"打开灯 / 关空调 / 调亮 / 开窗帘" -> 识别目标+动作 -> 控制后端执行。
 后端优先顺序：
-  ① ADB 桥（雷电模拟器智慧生活 App，免重启即用；华为生态设备）
-     自动检测：雷电模拟器 adb + 智慧生活 App，设备列表页直接点快捷开关
-  ② Home Assistant（通用中枢，支持米家/涂鸦/HomeKit/ESPHome 等 1000+ 生态）
+  ① Home Assistant（通用中枢，支持米家/涂鸦/HomeKit/ESPHome 等 1000+ 生态）
      配置：config.json 的 smart_home.ha = {"url": "http://192.168.x.x:8123", "token": "..."}
-  ③ 米家 miio 局域网直控（python-miio；需设备 token）
+  ② 米家 miio 局域网直控（python-miio；需设备 token）
      配置：config.json 的 smart_home.miio = {"设备名": {"ip": "192.168.x.x", "token": "...", "type": "plug|light|fan|air"}}
-  ④ 预留：涂鸦 Local / HomeKit / 红外（后续按需接入）
+  ③ 预留：涂鸦 Local / HomeKit / 红外（后续按需接入）
+（★ 2026-10-12 已删除 ADB/雷电模拟器桥——不再自动拉起模拟器）
 
 未接入任何桥时：发现设备照常播报，控制返回"暂未接入控制桥"。
 """
 import json
 import os
-import re
-import subprocess
-import time
+import sys
 
 D = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = os.path.join(D, "config.json")
-
-# ---- ADB 桥（雷电模拟器 + 华为智慧生活）----
-ADB_EXE = r"D:\雷电\LDPlayer9\adb.exe"
-ADB_SERIAL = "emulator-5554"
-ADB_PKG = "com.huawei.smarthome"
 
 # 常见智能家居目标（语音匹配用）
 TARGETS = [
@@ -36,6 +28,7 @@ TARGETS = [
     ("插座", ["插座", "插排", "排插"]),
     ("扫地机", ["扫地机", "扫地机器人", "扫拖机"]),
     ("电视", ["电视", "电视机"]),
+    ("电脑", ["电脑", "计算机", "主机", "pc"]),
     ("热水器", ["热水器", "电热水器"]),
     ("加湿器", ["加湿器"]),
     ("净化器", ["净化器", "空气净化器"]),
@@ -102,9 +95,11 @@ def _ha_control(domain, entity, action):
     token = ha.get("token") or ""
     if not url:
         return None
-    svc = "%s_turn_on" if action in ("on",) else (
-        "%s_turn_off" if action in ("off",) else "%s_toggle")
-    svc = svc % domain
+    svc = ("turn_on" if action in ("on",) else
+           ("turn_off" if action in ("off",) else "toggle"))
+    # ★ 2026-10-12【修复】HA 服务名是 turn_on/turn_off/toggle（不带域前缀），
+    #   之前拼成 light_turn_off 导致 /api/services/light/light_turn_off 404，
+    #   HA 控制一直失败。
     import urllib.request
     req = urllib.request.Request(
         url + "/api/services/%s/%s" % (domain, svc),
@@ -117,6 +112,84 @@ def _ha_control(domain, entity, action):
             return "已控制 %s" % entity if r.status == 200 else None
     except Exception:
         return None
+
+
+# 可控制的 HA 域
+_HA_DOMAINS = ("switch", "light", "fan", "climate", "cover", "media_player")
+# SonoffLAN 自动生成的辅助实体（不参与语音匹配）
+_HA_SKIP_SUFFIX = ("_pulse", "_led", "_startup", "_pulsewidth", "_restart", "_shutdown")
+
+
+def _ha_discover():
+    """从 Home Assistant 自动发现真实设备实体。
+    返回 [(domain, entity_id, 中文名, state)]，按"设备名"排序去重。
+    """
+    ha = (_cfg().get("smart_home") or {}).get("ha") or {}
+    url = (ha.get("url") or "").rstrip("/")
+    token = ha.get("token") or ""
+    if not url or not token:
+        return []
+    import urllib.request
+    req = urllib.request.Request(url + "/api/states",
+                                 headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            states = json.loads(r.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return []
+    out = []
+    for s in states:
+        eid = s.get("entity_id") or ""
+        domain = eid.split(".", 1)[0] if "." in eid else ""
+        if domain not in _HA_DOMAINS:
+            continue
+        low = eid.lower()
+        if any(low.endswith(x) for x in _HA_SKIP_SUFFIX):
+            continue
+        name = (s.get("attributes") or {}).get("friendly_name") or eid
+        out.append((domain, eid, str(name).strip(), s.get("state") or ""))
+    return out
+
+
+# 常见房间位置词（语音定位用）
+_POS_WORDS = ("卧室", "客厅", "厨房", "书房", "阳台", "卫生间", "洗手间", "次卧", "主卧")
+
+
+def _ha_find(target, kw, text=""):
+    """按语音目标在 HA 发现实体中匹配。
+    话里指定了房间位置时只匹配该位置，否则同类全部匹配。
+    返回 [(domain, entity_id, 中文名, state)]。
+    """
+    pos = ""
+    for p in _POS_WORDS:
+        if p in text:
+            pos = p
+            break
+    hits = []
+    for domain, eid, name, state in _ha_discover():
+        if target == "灯":
+            if "灯" not in name and "light" not in eid:
+                continue
+        elif not (kw in name or kw in eid):
+            continue
+        if pos and pos not in name:
+            continue
+        hits.append((domain, eid, name, state))
+    return hits
+
+
+def _ha_control_all(hits, action):
+    """控制一批实体，返回 (成功名串, 离线名串, 失败名串)。"""
+    ok, off, fail = [], [], []
+    for domain, eid, name, state in hits:
+        if state == "unavailable":
+            off.append(name)
+            continue
+        if _ha_control(domain, eid, action):
+            ok.append(name)
+        else:
+            fail.append(name)
+    return "、".join(ok), "、".join(off), "、".join(fail)
 
 
 def _miio_control(name, ip, token, kind, action):
@@ -152,209 +225,87 @@ def _miio_control(name, ip, token, kind, action):
         return None
 
 
-def _adb_run(*args):
-    """执行雷电 adb 命令，返回文本输出。"""
-    try:
-        r = subprocess.run([ADB_EXE, "-s", ADB_SERIAL] + list(args),
-                           capture_output=True, timeout=30)
-        return (r.stdout or b"").decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
-def _adb_online():
-    """雷电模拟器是否在线。"""
-    try:
-        return ADB_SERIAL in _adb_run("devices")
-    except Exception:
-        return False
-
-
-def _adb_launch():
-    """启动华为智慧生活 App。"""
-    _adb_run("shell", "monkey", "-p", ADB_PKG,
-             "-c", "android.intent.category.LAUNCHER", "1")
-    time.sleep(4)
-
-
-def _adb_dump():
-    """uiautomator dump 当前界面，返回 XML 文本。"""
-    _adb_run("shell", "uiautomator", "dump", "/sdcard/fairy_ui.xml")
-    time.sleep(1)
-    import tempfile
-    _loc = os.path.join(tempfile.gettempdir(), "fairy_ui.xml")
-    _adb_run("pull", "/sdcard/fairy_ui.xml", _loc)
-    try:
-        with open(_loc, encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return ""
-
-
-def _adb_tap(x, y):
-    _adb_run("shell", "input", "tap", str(int(x)), str(int(y)))
-    time.sleep(1.5)
-
-
-def _parse_bounds(b):
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", b or "")
-    if not m:
-        return None
-    x1, y1, x2, y2 = map(int, m.groups())
-    return (x1, y1, x2, y2)
-
-
-def _bbox_contains(bb, x, y):
-    return bb and bb[0] <= x <= bb[2] and bb[1] <= y <= bb[3]
-
-
-def _parse_devices(xml):
-    """解析智慧生活设备页：返回 [{name,status,btn_on,btn_off}]。"""
-    try:
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(xml)
-    except Exception:
-        return []
-    name_nodes, card_cands, sw_nodes = [], [], []
-    for n in root.iter("node"):
-        rid = n.get("resource-id") or ""
-        if rid == "com.huawei.smarthome:id/smarthome_devices_1_listitem_name":
-            name_nodes.append(n)
-        if n.get("class") == "android.view.ViewGroup" and n.get("clickable") == "true":
-            card_cands.append(n)
-        if rid == "com.huawei.smarthome:id/smarthome_devices_1_listitem_ligth_status":
-            sw_nodes.append(n)
-    devs = []
-    for n in name_nodes:
-        nm = (n.get("text") or "").strip()
-        if not nm:
-            continue
-        nb = _parse_bounds(n.get("bounds"))
-        if not nb:
-            continue
-        cx, cy = (nb[0] + nb[2]) // 2, (nb[1] + nb[3]) // 2
-        card = None
-        card_area = None
-        for c in card_cands:
-            cb = _parse_bounds(c.get("bounds"))
-            if _bbox_contains(cb, cx, cy):
-                _area = (cb[2] - cb[0]) * (cb[3] - cb[1])
-                if card_area is None or _area < card_area:
-                    card, card_area = c, _area
-        btn_on = btn_off = None
-        if card is not None:
-            cb = _parse_bounds(card.get("bounds"))
-            for s in sw_nodes:
-                sb = _parse_bounds(s.get("bounds"))
-                if not sb:
-                    continue
-                scx, scy = (sb[0] + sb[2]) // 2, (sb[1] + sb[3]) // 2
-                if not _bbox_contains(cb, scx, scy):
-                    continue
-                for q in s.iter("node"):
-                    cd = q.get("content-desc") or ""
-                    if cd in ("开启", "关闭"):
-                        qb = _parse_bounds(q.get("bounds"))
-                        qc = ((qb[0] + qb[2]) // 2, (qb[1] + qb[3]) // 2) if qb else (scx, scy)
-                        if cd == "开启":
-                            btn_on = qc
-                        else:
-                            btn_off = qc
-        st = "on" if btn_off else ("off" if btn_on else "")
-        devs.append({"name": nm, "status": st, "btn_on": btn_on, "btn_off": btn_off})
-    return devs
-
-
-def _adb_ensure_devices_page():
-    """启动智慧生活并确保停在设备列表页，返回 XML。"""
-    _adb_launch()
-    _xml = _adb_dump()
-    if _xml and "smarthome_devices_1_listitem_name" not in _xml:
-        m = re.search(r'text="家居"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', _xml)
-        if m:
-            x1, y1, x2, y2 = map(int, m.groups())
-            _adb_tap((x1 + x2) // 2, (y1 + y2) // 2)
-            time.sleep(2)
-            _xml = _adb_dump()
-    return _xml or ""
-
-
-def _adb_control(text):
-    """通过雷电智慧生活控制设备（快捷开关）。"""
-    _a, _aw = _pick_action(text)
-    if not _a:
-        return None
-    _goal = text
-    if _aw:
-        _goal = _goal.replace(_aw, "", 1).strip()
-    _xml = _adb_ensure_devices_page()
-    if not _xml:
-        return "雷电里的智慧生活没打开成功，检查一下模拟器"
-    _devs = _parse_devices(_xml)
-    if not _devs:
-        return "智慧生活设备页没识别到设备，检查模拟器界面"
-    _dev = None
-    for _d in _devs:
-        if _goal and (_goal in _d["name"] or _d["name"] in _goal):
-            _dev = _d
-            break
-    if not _dev:
-        # 目标不是家居设备词（如"微信/QQ"）→ 放行给软件路由
-        _SMART_WORDS = ("灯", "空调", "风扇", "窗帘", "插座", "扫地", "电视",
-                        "热水器", "加湿器", "净化器", "门锁", "晾衣", "摄像头",
-                        "监控", "音箱", "电脑", "打印机", "能耗", "冰箱",
-                        "洗衣机", "烤箱", "电饭煲", "开关", "智能")
-        if not _goal or not any(_w in _goal for _w in _SMART_WORDS):
-            return None
-        _names = "、".join(d["name"] for d in _devs[:5])
-        return "设备列表里没找到「%s」，现在能看到：%s" % (_goal or "目标设备", _names)
-    _want_on = (_a == "on")
-    _btn = _dev.get("btn_on") if _want_on else _dev.get("btn_off")
-    if not _btn:
-        if _dev.get("status") == ("off" if _want_on else "on"):
-            return _dev["name"] + (" 已经关了" if not _want_on else " 已经开着")
-        return _dev["name"] + " 没有快捷开关，进设备页手动控制吧"
-    _adb_tap(*_btn)
-    return "已%s %s" % ("打开" if _want_on else "关闭", _dev["name"])
-
-
 def control(text):
-    """语音控制入口。返回播报文本。"""
-    # ① ADB 桥优先（雷电智慧生活：音箱/电脑/摄像头等真实设备名）
+    """语音控制入口。返回播报文本。
+    ★ 2026-10-13【默认关闭】config.json 的 smart_home.enabled 为 true 才启用，
+    默认 false —— 不连接任何智能家居后端。
+    """
+    _sm0 = (_cfg().get("smart_home") or {})
+    if not _sm0.get("enabled", False):
+        return "智能家居未启用（如需使用，在 config.json 的 smart_home 里设置 enabled 为 true）"
+    _t0, _kw0 = _pick_target(text)
+    if not _t0:
+        return None  # 不是智能家居控制目标，交给其他路由
+    _a0, _aw0 = _pick_action(text)
+    if not _a0:
+        return "请说清楚要开还是要关，比如：打开" + _kw0
+    _sm = (_cfg().get("smart_home") or {})
+    # ① Home Assistant：显式映射优先，其次自动发现真实实体
+    _ha = _sm.get("ha") or {}
+    if _ha.get("url"):
+        _ent = _ha.get("entities") or {}
+        _eid = _ent.get(_t0) or _ent.get(_kw0)
+        if _eid and not _eid.endswith(".xxx"):
+            # 显式映射（config 指定实体）优先
+            try:
+                _r = _ha_control(_eid.split(".", 1)[0], _eid, _a0)
+                if _r:
+                    return _r
+            except Exception:
+                pass
+            return "HA 控制%s没成功，检查设备是否在线或实体名是否对" % _kw0
+        # 自动发现（SonoffLAN 等集成拉到的真实实体）
+        try:
+            _hits = _ha_find(_t0, _kw0, text)
+            if _hits:
+                _okn, _offn, _failn = _ha_control_all(_hits, _a0)
+                _verb = "打开" if _a0 == "on" else ("关闭" if _a0 == "off" else "切换")
+                _parts = []
+                if _okn:
+                    _parts.append("已%s%s" % (_verb, _okn))
+                if _offn:
+                    _parts.append("%s离线没操作" % _offn)
+                if _failn:
+                    _parts.append("%s控制失败" % _failn)
+                if _parts:
+                    return "，".join(_parts)
+                return "HA 控制%s没成功，检查设备是否在线" % _kw0
+        except Exception:
+            pass
+    # ② 易微联 eWeLink 云直连（账号在 config.json smart_home.ewelink）
     try:
-        if _adb_online():
-            _r = _adb_control(text)
-            if _r:
-                return _r
+        import ewelink_bridge as _ew
+        _ds = _ew.get_devices()
+        if _ds:
+            _hitd = None
+            for _d in _ds:
+                _nm = _d.get("name") or ""
+                if _kw0 and (_kw0 in _nm or _nm in _kw0):
+                    _hitd = _d
+                    break
+            if not _hitd:
+                for _d in _ds:
+                    _nm = _d.get("name") or ""
+                    if _t0 == "灯" and "灯" in _nm:
+                        _hitd = _d
+                        break
+            if _hitd:
+                _want_on = _a0 == "on"
+                if _ew.control_device(_hitd["deviceid"], {"switch": _a0}):
+                    return "已%s %s" % ("打开" if _want_on else "关闭", _hitd["name"])
+                return "易微联控制%s没成功，检查设备是否在线" % _hitd["name"]
     except Exception:
         pass
-    _t, _kw = _pick_target(text)
-    if not _t:
-        return None  # 不是智能家居控制目标，交给其他路由
-    _a, _aw = _pick_action(text)
-    if not _a:
-        return "请说清楚要开还是要关，比如：打开" + _kw
-    sm = (_cfg().get("smart_home") or {})
-    # ① Home Assistant：配置了就直接按实体名控制
-    ha = sm.get("ha") or {}
-    if ha.get("url"):
-        ent = ha.get("entities") or {}
-        _eid = ent.get(_t) or ent.get(_kw)
-        if _eid:
-            _r = _ha_control("light" if _t == "灯" else (
-                "climate" if _t == "空调" else "switch"), _eid, _a)
-            if _r:
-                return _r
-    # ② 米家 miio 直控
-    mi = sm.get("miio") or {}
+    # ③ 米家 miio 直控
+    mi = _sm.get("miio") or {}
     for _nm, _info in mi.items():
-        if _kw in _nm or _t in _nm:
+        if _kw0 in _nm or _t0 in _nm:
             _r = _miio_control(_nm, _info.get("ip", ""),
                                _info.get("token", ""),
-                               _info.get("type", "plug"), _a)
+                               _info.get("type", "plug"), _a0)
             if _r:
                 return _r
-    return "已发现%s设备，但还没接入控制桥。可以在 config.json 里配 smart_home（米家设备或 Home Assistant），我就帮你控制。" % _t
+    return "已发现%s设备，但还没接入控制桥。可以在 config.json 里配 smart_home（Home Assistant 或米家设备），我就帮你控制。" % _t0
 
 
 if __name__ == "__main__":

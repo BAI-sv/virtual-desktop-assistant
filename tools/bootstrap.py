@@ -277,10 +277,10 @@ def probe_tools():
     out["Ollama"] = bool(oll)
 
     # ---- 便携目录类：查特征目录（比名字匹配可靠）----
-    for name, dirs in (("GPT-SoVITS", [r"D:\GPT-SoVITS-v2pro"]),
-                       ("ComfyUI", [r"D:\ComfyUI_windows_portable", r"D:\Comfyui-xiao-v2",
-                                fairy_root.NAI_ROOT]),
-                       ("DevEco Studio", [r"E:\DevEco Studio", r"C:\Program Files\Huawei\DevEco Studio"]),
+    for name, dirs in (("GPT-SoVITS", [r"D:\GPT-SoVITS"]),
+                       ("ComfyUI", [r"D:\ComfyUI_windows_portable"],
+                                fairy_root.NAI_ROOT),
+                       ("DevEco Studio", [r"C:\Program Files\Huawei\DevEco Studio"]),
                        ("HIP/ROCm", [r"C:\Program Files\AMD\ROCm"]),
                        ("HWiNFO", [r"C:\Program Files\HWiNFO64"]),
                        ("CPU-Z", [r"C:\Program Files\CPUID"]),
@@ -333,7 +333,7 @@ def stage3_software():
         sw["notable"][nice] = any(k in hay for k in kws)
 
     # 【不足1 修复】光靠名单匹配会误判 —— 实测踩到：
-    #   · Ollama 被判"未装"（它是便携版，不在卸载名单里；但有 ollama.pid / D:\fqdeepseek 数据根）
+    #   · Ollama 被判"未装"（它是便携版，不在卸载名单里；但有 ollama.pid / 本地数据根）
     #   · WSL   被判"未装"（它是 Windows 功能，根本不在已安装程序名单里）
     #   · Docker 同理
     # 所以对这类工具改成【实际调用探测】：跑命令 / 查路径 / 查特征目录。

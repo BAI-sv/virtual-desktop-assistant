@@ -574,7 +574,7 @@ def install_rep(name):
 # ---------------- 绿色/单文件软件发现（不写注册表也能用） ----------------
 
 # 绿色/单文件软件扫描目录：优先 config.json 的 paths.portable_dirs（按你本机实际填写）；
-# 未配置时扫描 FairyX 根目录 + 常见绿色软件目录 + 各盘根（E:\ F:\ 整盘会较慢，可自行删减）
+# 未配置时扫描 FairyX 根目录 + 常见绿色软件目录 + 各盘根（整盘扫描较慢，可自行删减）
 PORTABLE_DIRS = (_cpaths.get("portable_dirs") or
                  [os.path.join(D, "tools"), os.path.join(D, "everything"),
                   r"C:\Portable", r"D:\Portable", r"D:\Tools", r"D:\Green"])
