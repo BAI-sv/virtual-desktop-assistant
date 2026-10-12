@@ -30,14 +30,15 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODELS = r"D:\FAIRY\models\models"
+ROOT = os.path.dirname(HERE)
+MODELS = os.environ.get("FAIRY_MODELS", os.path.join(ROOT, "models", "models"))
 
 # sherpa-onnx 版 SenseVoice（免 torch，默认）
 SENSE_ONNX = os.path.join(
     MODELS, "xiaowangge--sherpa-onnx-sense-voice-small", "snapshots", "master")
 
-# FunASR 版（独立环境 D:\FAIRY\envs\funasr，DirectML GPU 推理）
-FUNASR_PY = r"D:\FAIRY\envs\funasr\Scripts\python.exe"
+# FunASR 版（独立环境 envs\funasr，DirectML GPU 推理）
+FUNASR_PY = os.environ.get("FAIRY_FUNASR_PY", os.path.join(ROOT, "envs", "funasr", "Scripts", "python.exe"))
 WORKER = os.path.join(HERE, "funasr_worker.py")
 FUNASR_PARAFORMER = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 FUNASR_SENSEVOICE = "iic/SenseVoiceSmall"

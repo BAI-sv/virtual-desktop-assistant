@@ -8,7 +8,7 @@ build_line_pools.py —— 从语料库【机械】构建"执行提示"的台词
   `run_python`/`run_node` 共用「通信结构解析进度50」—— 主代理整天跑 Python，
   用户就一直听同一句。**素材利用率 13/1600 = 0.8%**。
 
-【产物】`D:/FAIRY/voice/line_pools.json`
+【产物】`<项目根>/voice/line_pools.json`
   {"built":..,"count":370,"pools":{"search":[..],"scan":[..], ...}}
   · 每句都来自语料库，且【音频文件确实存在】（本脚本校验，缺文件的不收）
   · 两遍筛：① 严格（以状态/工作词【开头】）② 不够 MIN_POOL 的池用宽松筛补足

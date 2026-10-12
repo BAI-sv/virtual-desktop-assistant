@@ -27,7 +27,7 @@ fairy_endpoints.py —— Fairy 的【接口寻址与自动降级】中心
   4) DSH 的 /dsh-tts-api/speak      -> 音色 edge-tts-fallback ✗（通用音色，最后手段）
   5) 全都失败                        -> 返回 None，调用方自己决定（球会退回游戏原声）
 
-【配置】优先级：环境变量 > D:\FAIRY\fairy.json 的 "endpoints" 段 > 默认值
+【配置】优先级：环境变量 > <项目根>/fairy.json 的 "endpoints" 段 > 默认值
   {
     "endpoints": {
       "dsh_base":     "http://127.0.0.1:19387",
@@ -65,7 +65,8 @@ DEFAULTS = {
     "local_base": "http://127.0.0.1:19388",
     "indextts_url": "http://127.0.0.1:9881/tts",
     "ref_audio": os.path.join(
-        (_root.VOICE if _root else r"D:\FAIRY\voice"), "index_voices", "fairy.wav"),
+        (_root.VOICE if _root else os.path.join(os.path.dirname(_HERE), "voice")),
+         "index_voices", "fairy.wav"),
     # ★ 2026-10-11【DSH 解耦】默认 local（单机模式）：不再强关联 DSH。
     #   要用 DSH 内核时：球右键 → 大脑模式 → DSH 内核（此时才连接/侦测 DSH）。
     "prefer": "local",

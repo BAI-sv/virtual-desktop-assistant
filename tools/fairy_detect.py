@@ -2,7 +2,7 @@
 
 基于 Ultralytics YOLO11n（COCO 80 类，模型约 5MB，效果/速度平衡最好）。
 注意：本脚本用 funasr 环境的 python 跑（复用其 torch）：
-    "D:/FAIRY/envs/funasr/Scripts/python.exe" fairy_detect.py --full
+    用法示例：<项目根>/envs/funasr/Scripts/python.exe fairy_detect.py --full
 用法：
     --full                全屏检测
     --region X Y W H      区域检测
@@ -16,7 +16,8 @@ import json
 import os
 import sys
 
-MODEL_DIR = r"D:\FAIRY\models"
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.environ.get("FAIRY_MODELS_DIR", os.path.join(_ROOT, "models"))
 DEFAULT_MODEL = "yolov11n.pt"
 
 

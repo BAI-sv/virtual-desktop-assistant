@@ -3027,7 +3027,8 @@ class FairyBall(tk.Tk):
 
     @staticmethod
     def _funasr_py():
-        p = r"D:\FAIRY\envs\funasr\Scripts\python.exe"
+        p = os.environ.get("FAIRY_FUNASR_PY",
+                           os.path.join(fairy_root.ROOT, "envs", "funasr", "Scripts", "python.exe"))
         return p if os.path.exists(p) else sys.executable
 
     def _vision_ocr(self):

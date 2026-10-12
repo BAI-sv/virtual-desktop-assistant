@@ -21,8 +21,11 @@ import sys
 import time
 from datetime import datetime
 
-LOG = r"D:\FAIRY\logs\dsh_restart.log"
-EXE = r"C:\Users\Administrator\AppData\Local\Programs\DeepSeek Harness\DeepSeek Harness.exe"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+LOG = os.environ.get("FAIRY_DSH_LOG", os.path.join(_ROOT, "logs", "dsh_restart.log"))
+EXE = os.environ.get("DSH_EXE", os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                                            "Programs", "DeepSeek Harness", "DeepSeek Harness.exe"))
 PORT = 19387
 
 # ★ 常量别记错：0x08000000 = CREATE_NO_WINDOW（不是 0x00000200）

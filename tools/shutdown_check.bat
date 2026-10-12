@@ -1,6 +1,9 @@
 ﻿@echo off
-
-"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\pythonw.exe" "D:\FAIRY\tools\cpu_watch.py"
-
-"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\pythonw.exe" "D:\FAIRY\tools\health_check.py" --quiet --fast
-
+rem shutdown_check.bat - quick health check before shutdown (optional autostart)
+rem No hard-coded paths: script dir from %~dp0, interpreter found via PATH.
+set "TOOLS=%~dp0"
+set "PY="
+for %%P in (pythonw.exe) do set "PY=%%~$PATH:P"
+if not defined PY exit /b 0
+"%PY%" "%TOOLS%cpu_watch.py"
+"%PY%" "%TOOLS%health_check.py" --quiet --fast

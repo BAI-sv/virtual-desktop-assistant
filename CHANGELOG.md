@@ -1,5 +1,26 @@
 # 更新日志
 
+## [1.1.2] - 2026-10-12
+
+**可移植性加固：消除本机硬编码路径，补齐可选依赖清单。**
+
+### 新增
+- **视觉工具** `tools/fairy_ocr.py`（截图取字，RapidOCR）＋ `tools/fairy_detect.py`（目标检测，YOLO11）
+- **设备自动发现与连接** `tools/fairy_iot.py`（局域网 / 蓝牙 / mDNS / 串口四通道扫描，自动记录与连接）
+- **听歌识曲常开** `tools/song_recognition.py`（Shazam 指纹协议，识别新歌自动气泡播报）
+- 视觉 / 设备 / 语音播报接入球右键菜单
+
+### 修复
+- **消除全部本机硬编码路径**（`D:\FAIRY` / `C:\Users\Administrator` 共 20 余处）：
+  一律改为「环境变量优先 ＋ 基于 `__file__` 自动推导」，换机器无需改代码即可运行
+- **补齐 `requirements.txt` 可选依赖**：rapidocr / ultralytics / imageio-ffmpeg / pydub /
+  pycaw / pyperclip / comtypes（均为函数内惰性导入，不装只少对应功能，不影响主体运行）
+- **`shutdown_check.bat` 去本机路径**：脚本目录用 `%~dp0` 推导，解释器从 PATH 查找
+- 文档模板占位符清理（`docs/troubleshooting.md` 验证戳示例）
+
+### 说明
+- 本地维护工具 `tools/clean_repo.py` 不入仓库（已由 `.gitignore` 排除，本地运行）
+
 ## [1.1] - 2026-10-10
 
 **范围扩充：把「现在真正在跑的 Fairy」整套开源**（桌面球 / 本地服务 / 助手窗口 / 窗口对接 /

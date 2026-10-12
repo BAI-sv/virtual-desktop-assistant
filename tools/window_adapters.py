@@ -17,7 +17,7 @@ window_adapters.py —— Fairy 的【窗口发现 / 识别 / 读取 / 操作】
   ① 白名单：只有 fairy.json 里 enabled=true 的程序才会被碰；没登记的窗口一律不碰
   ② 默认只读：mode="read" 只能看。要打字/点击必须显式把 mode 改成 "write"；
      点击还要额外把按钮名写进 allow_click_names —— 没写 = 一个都点不了
-  ③ 全程日志：每次读/写/点都写 D:\FAIRY\logs\window_ops.jsonl，可追溯
+  ③ 全程日志：每次读/写/点都写 <项目根>/logs/window_ops.jsonl，可追溯
 
 【本机实测到的关键事实】（2026-10-10，详见交付报告）
   · 本机【没装】uiautomation / pywinauto；但【装了 comtypes】
@@ -148,7 +148,7 @@ def load_cfg():
     except Exception:
         seg = {}
     # ★★ 重要-1（关键一环）：配置里的 danger_words 以前是【整条替换】默认表。
-    #   实测 D:\FAIRY\fairy.json 里正好存着一份【只有中文】的旧词表 ——
+    #   实测项目根 fairy.json 里正好存着一份【只有中文】的旧词表 ——
     #   于是就算代码里补了英文词，运行时也还是漏（SEND/Delete all 照样过）。
     #   现在改成【并集】：内置词表 ∪ 配置词表。
     #   确实想用自己那一份：在 windows 段写 "danger_words_replace": true。

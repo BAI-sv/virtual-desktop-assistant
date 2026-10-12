@@ -59,11 +59,13 @@ DEFAULT_UPSTREAM = "http://127.0.0.1:8080"
 # ---------------------------------------------------------------------------
 STT_MODEL = None
 STT_LOCK = threading.Lock()
-WHISPER_MODELS = os.environ.get("WHISPER_MODELS", r"D:\FAIRY\models\whisper")
+_UI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WHISPER_MODELS = os.environ.get("WHISPER_MODELS", os.path.join(_UI_ROOT, "models", "whisper"))
 
 DSH_API = os.environ.get("DSH_API", "http://127.0.0.1:19387")
 INDEXTTS_URL = os.environ.get("FAIRY_INDEXTTS_URL", "http://127.0.0.1:9881")
-REF_AUDIO = os.environ.get("FAIRY_REF_AUDIO", r"D:\FAIRY\voice\index_voices\fairy.wav")
+REF_AUDIO = os.environ.get("FAIRY_REF_AUDIO",
+                         os.path.join(_UI_ROOT, "voice", "index_voices", "fairy.wav"))
 
 _FFMPEG = None
 

@@ -24,7 +24,8 @@ except Exception as e:
     _DEV = "cpu"
     print("[worker] GPU 不可用，降级 CPU: %s" % e, file=sys.stderr)
 
-MODELS = r"D:\FAIRY\models\models"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+MODELS = os.environ.get("FAIRY_MODELS", os.path.join(os.path.dirname(_HERE), "models", "models"))
 PARA = os.path.join(MODELS,
                     "iic--speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
                     "snapshots", "master")

@@ -24,8 +24,8 @@ import subprocess
 import sys
 import time
 
-FAIRY_JSON = r"D:\FAIRY\fairy.json"
 _SELF = os.path.dirname(os.path.abspath(__file__))
+FAIRY_JSON = os.environ.get("FAIRY_JSON", os.path.join(os.path.dirname(_SELF), "fairy.json"))
 
 VENDOR_OUI = [
     ("华为", ["28-6E-D4", "F4-9C-34", "94-29-37", "AC-8E-D7", "64-16-66",

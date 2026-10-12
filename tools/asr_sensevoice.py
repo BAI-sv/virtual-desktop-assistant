@@ -19,7 +19,11 @@ import sys
 
 import numpy as np
 
-MODEL_DIR = r"D:\FAIRY\models\models\xiaowangge--sherpa-onnx-sense-voice-small\snapshots\master"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+MODEL_DIR = os.environ.get("FAIRY_SENSEVOICE_DIR", os.path.join(
+    _ROOT, "models", "models", "xiaowangge--sherpa-onnx-sense-voice-small",
+    "snapshots", "master"))
 
 
 def _recognizer():

@@ -124,7 +124,7 @@ DEFAULT_CONF = {
     },
     "ball": {"speak": True, "bubble_seconds": 4, "brief_seconds": 18},
 # ★ 2026-10-09【删除桌宠组件】：
-    #   主程序 whale_pet.py 与 160MB 动画素材均为第三方，已移出（D:\FAIRY\_to_delete_whale\）。
+    #   主程序 whale_pet.py 与 160MB 动画素材均为第三方，已移出（项目根下 _to_delete_whale\）。
     #   本组件已移除；若以后恢复，请一并恢复自备素材。
     "advisor": {"enabled": True, "observe_min": 5, "min_gap_min": 10},
     "balance": {"warn_yuan": 30, "alert_yuan": 10},
