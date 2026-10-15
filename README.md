@@ -59,6 +59,18 @@
 | 外部内核插件 | `fairy-plugin/` | DeepSeek Harness 插件（可选）：推送文本给球念、状态与帧接口 |
 | 纯逻辑 | `tools/fairy_logic.py`、`mic_logic.py`、`wake_logic.py` | 问候 / 穿衣 / 语气 / 天气点评 / 麦克风与唤醒的纯判断逻辑（无 IO，便于单测） |
 
+### 新增能力（1.1.5）
+
+| 模块 | 文件 | 能力 |
+|---|---|---|
+| 本地文本引擎 | `tools/fairy_llm.py` | 8085，llama.cpp（Vulkan）跑 Qwen3.5-9B，替代 Ollama，纯文本 GGUF |
+| 本地视觉引擎 | `tools/fairy_vl.py` | 8086，Qwen3-VL-8B，可看图可对话 |
+| 屏幕灯效 | `tools/fairy_rim.py` | 全屏边缘 RGB 呼吸灯带，随本地模型运行状态变色（点击穿透、直角） |
+| 统一对话页 | `tools/fairy_chat.py` | 8090，四引擎网页对话（Strata本地 / 文本9B / 视觉8B / 网络AI）+ 多模态输入（图片/文件/语音）+ 语音播报 + 上下文压缩 + 复制/分享 |
+| 机器人 | `tools/robot_bridge.py` ＋ `tools/robot/` | 六道安全闸 + 急停锁存 + 看门狗 + 参数限幅；`status/robots/do/say/estop/clear`，默认 mock 干跑 |
+| 智能家居 | `tools/ha_bridge.py` ＋ `ewelink_bridge.py` | Home Assistant 中枢：`fairy.py ha discover/act/state/watch` |
+| DSH 插件 | `office-fairy` 技能包 | Fairy 全能力暴露给 DSH（DeepSeek Harness）统一调用，DSH 按用户话自动识别触发 |
+
 ## 快速开始
 
 ```bash
@@ -71,9 +83,9 @@ copy fairy_root.example.json fairy_root.json  # 配置根：路径（可选，�
 copy fairy.example.json fairy.json            # 组件开关 / 接口寻址 / 窗口对接白名单（新版用）
 
 # 3. 本地大脑（二选一；也可以只用云端）
-#    a) Ollama：装好后导入模型（如 qwen3.5-9b），改 config.json 的 brain.providers
-#    b) llama.cpp：按上游文档起 llama-server（Vulkan/CUDA 均可）；
-#       跑视觉模型可参考 tools/llama_vl_start.bat
+#    a) Fairy 组件一键：`py -3.12 tools/fairy.py start llm`（文本引擎 8085）/ `start vl`（视觉引擎 8086），
+#       底层是 llama.cpp（Vulkan）；模型放好后用环境变量 LLAMA_SERVER / LLM_MODEL / VL_MODEL 指向
+#    b) Ollama：装好后导入模型（如 qwen3.5-9b），改 config.json 的 brain.providers
 
 # 4. 启动
 py -3.12 tools/fairy.py start     # 新版：桌面球 + 守护 + 本地服务
@@ -127,6 +139,10 @@ py -3.12 fairy.py                 # 旧版：单文件程序
 说「缺什么软件」        → 26 大分类扫描，常用类优先询问安装
 说「打开阅读器」        → 已装软件 / 绿色软件自动匹配调用
 说「授权」              → 语音授权（扫描/安装/系统更改）
+说「控制机器人」        → 机器人安全控制（六道闸 + 急停，默认干跑）
+说「打开智能家居」      → Home Assistant 中枢：发现/查看/控制设备
+说「开灯效 / 关灯效」   → 屏幕边缘 RGB 呼吸灯带开关
+说「用本地AI / 用网络AI」 → 语音切换对话引擎（ear 在跑时）
 ```
 
 右键桌面球还可以：换位置 / 停止·启动本地运算（回收显存）/ 打开助手窗口 / 全部退出。
@@ -138,7 +154,7 @@ py -3.12 fairy.py                 # 旧版：单文件程序
 - **语音模型**：见 [voice/README.md](voice/README.md)（参考音自备）。
 - **音色克隆**：IndexTTS 为**外部服务**（独立目录 + 独立 venv），本仓库不含其权重；
   不装也能用：语音会走缓存 / edge-tts 兜底。
-- **视觉模型**：Qwen3-VL（社区量化版），llama-server `--mmproj` 启动，端口 8085。
+- **视觉模型**：Qwen3-VL（社区量化版），llama-server `--mmproj` 启动，端口 8086。
 
 ## 依赖与致谢
 
@@ -162,5 +178,5 @@ py -3.12 fairy.py                 # 旧版：单文件程序
   全过程写审计日志。
 - 扫描报告仅存本机，不联网上传。
 - 云端大脑（DeepSeek）key 从环境变量读取，不写入配置文件。
-- 端口：Ollama 11434 / llama-server 8080·8085 / Everything HTTP 8092 / Fairy 本地服务 19388 /
-  助手窗口 8081 / 音色服务 9881（均仅本机）。
+- 端口：Strata 8080 / 本地文本引擎 8085 / 本地视觉引擎 8086 / 对话页 8090 /
+  Everything HTTP 8092 / Fairy 本地服务 19388 / 助手窗口 8081 / 音色服务 9881（均仅本机）。

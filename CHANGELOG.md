@@ -1,5 +1,35 @@
 # 更新日志
 
+## [1.1.5] - 2026-10-15
+
+**机器人子系统 + 本地引擎 + 屏幕灯效 + 统一对话页 + 智能家居 + DSH 插件。**
+
+### 新增
+- **机器人控制** `tools/robot_bridge.py` ＋ `tools/robot/`（12 个模块）：六道安全闸 ＋ 急停锁存 ＋
+  看门狗 ＋ 参数限幅，默认 mock 干跑不会真动硬件；`status/robots/do/say/estop/clear`，
+  配置 `robot/robot.json`
+- **本地文本引擎** `tools/fairy_llm.py`（8085，llama.cpp Vulkan 跑 Qwen3.5-9B，替代已卸载的 Ollama）
+- **本地视觉引擎** `tools/fairy_vl.py`（8086，Qwen3-VL-8B，可看图可对话）
+- **屏幕边缘 RGB 呼吸灯效** `tools/fairy_rim.py`：全屏透明灯带随本地模型运行状态变色（点击穿透、直角）
+- **统一对话页** `tools/fairy_chat.py`（8090）：四引擎网页对话（Strata本地 / 文本9B / 视觉8B / 网络AI），
+  多模态输入（图片 / 文件 / 语音）、语音播报、上下文压缩、复制 / 分享按钮
+- **智能家居中枢** `tools/ha_bridge.py`（`fairy.py ha discover/act/state/watch`）＋ `ewelink_bridge.py`
+- **语音引擎切换** `tools/fairy_ear.py`：用本地AI / 用网络AI / 用自动AI
+- **DSH 插件** `office-fairy` 技能包：Fairy 全能力暴露给 DSH（DeepSeek Harness）统一调用
+- fairy.py 组件表扩至 10 个：ball / tts / guard / host / ear / llm / vl / rim / chat
+
+### 变更
+- 本地引擎不再依赖 Ollama：文本 8085（llm）、视觉 8086（vl）由 fairy.py 统一管理
+- 对话统一走 8090 对话页（代理转发各引擎），右上角下拉切换引擎
+
+## [1.1.4] - 2026-10-14
+
+**智能家居默认关闭 + 发布清理（去本机路径 / ADB 残留，配置示例补 `smart_home` 段）。**
+
+## [1.1.3] - 2026-10-13
+
+**本地全量同步（新增功能模块 + 智能家居 HA）+ 控制面板标题栏 + README 环境说明。**
+
 ## [1.1.2] - 2026-10-12
 
 **可移植性加固：消除本机硬编码路径，补齐可选依赖清单。**
