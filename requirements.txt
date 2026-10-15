@@ -30,9 +30,10 @@ pyperclip>=1.8                # 剪贴板历史（函数内惰性导入）
 comtypes>=1.1                # UI 自动化（窗口适配，函数内惰性导入）
 keyboard>=0.13.5             # 全局热键（快捷操作，函数内惰性导入）
 python-miio>=0.5.12          # 小米智能家居控制（smart_home，函数内惰性导入）
+websocket-client>=1.6        # ewelink 智能家居（EWELINK 局域网协议，函数内惰性导入）
+pyserial>=3.5                # 串口设备 / 机器人串口（robot_link/robot_serial，惰性导入）
 
 # ============ 重依赖 / 可选（体积大，按需装） ============
 # scipy>=1.10                # 图像/信号处理（部分旧工具）
 # torch>=2.0                 # IndexTTS 音色克隆（跑在它自己的 venv 里，主环境可不装）
 # opencv-python>=4.8         # 部分图像处理
-# pyserial>=3.5              # 串口设备（惰性导入，未装时仅串口功能不可用）

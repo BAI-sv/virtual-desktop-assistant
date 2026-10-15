@@ -4,7 +4,12 @@
     "ball": true,
     "guard": true,
     "tts": false,
-    "host": true
+    "host": true,
+    "ear": true,
+    "llm": true,
+    "vl": true,
+    "rim": true,
+    "chat": true
   },
   "_silent_说明": [
     "这里列出的脚本一律用 pythonw.exe 启动（绝不弹控制台窗口）。",
@@ -18,7 +23,8 @@
     "indextts_start.py": true,
     "bootstrap.py": true,
     "fairy_host.py": true,
-    "fairy_ball.py": true
+    "fairy_ball.py": true,
+    "fairy_ear.py": true
   },
   "_endpoints_说明": [
     "接口寻址。优先级：环境变量 > 这里 > 代码默认值。",

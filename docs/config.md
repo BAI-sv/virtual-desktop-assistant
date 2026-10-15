@@ -15,7 +15,8 @@
 {
   "_说明": "Fairy 统一配置：所有组件的开关都在这。改完保存即可（多数项下次启动生效）。",
 
-  "components": { "ball": true, "guard": true, "tts": false, "host": true },
+  "components": { "ball": true, "guard": true, "tts": false, "host": true,
+                  "ear": true, "llm": true, "vl": true, "rim": true, "chat": true },
 
   "ball":    { "speak": true, "bubble_seconds": 4, "brief_seconds": 18 },
   "advisor": { "enabled": true, "observe_min": 5, "min_gap_min": 10 },
@@ -37,6 +38,11 @@
 | `components.tts` | 是否随 `start` 启动语音合成服务。**★ 建议保持 `false`** —— 改 `true` 会与 `guard` 重复拉起（实测 4 个进程） | `false` | 布尔 | 是 |
 | `components.guard` | 是否启动音色保活守护 | `true` | 布尔 | 是 |
 | `components.host` | 是否启动本地服务（19388） | `true` | 布尔 | 是 |
+| `components.ear` | 是否随 `start` 启动语音耳朵（唤醒/对话） | `true` | 布尔 | 是 |
+| `components.llm` | 是否随 `start` 启动本地文本引擎（8085，Qwen3.5-9B） | `true` | 布尔 | 是 |
+| `components.vl` | 是否随 `start` 启动本地视觉引擎（8086，Qwen3-VL-8B） | `true` | 布尔 | 是 |
+| `components.rim` | 是否随 `start` 启动屏幕 RGB 灯效 | `true` | 布尔 | 是 |
+| `components.chat` | 是否随 `start` 启动统一对话页（8090） | `true` | 布尔 | 是 |
 | `ball.speak` | 球是否出声说话 | `true` | 布尔 | 是 |
 | `ball.bubble_seconds` | 气泡显示时长（秒） | `4` | 数字 | 是 |
 | `ball.brief_seconds` | 开机播报时长（秒） | `18` | 数字 | 是 |
@@ -48,7 +54,7 @@
 | `news.count` | 新闻条数（`0` = 用默认） | `0` | 整数 | 是 |
 | `news.keyword_count` | 关键词新闻条数 | `0` | 整数 | 是 |
 | `endpoints.prefer` | 大脑模式：`auto` 自动（DSH 在线优先）；`dsh` 强制用 DSH；`local` 只用本地内核（Strata/Ollama/LLM）。可在球右键“AI 大模型 → 大脑模式”或语音“使用 DSH / 使用本地 / 自动模式”切换，切换即时生效 | `auto` | `auto`/`dsh`/`local` | 否（热读） |
-| `ai.backend` | 本地推理后端：`strata`（8080）/ `ollama`（11434）/ `llm`（llama.cpp，8085）/ `custom`（自定义 OpenAI 兼容接口） | `strata` | 字符串 | 否（球菜单即改即用） |
+| `ai.backend` | 本地推理后端：`strata`（8080）/ `ollama`（11434）/ `llm`（文本 8085）/ `vl`（视觉 8086）/ `custom`（自定义 OpenAI 兼容接口） | `strata` | 字符串 | 否（球菜单即改即用） |
 | `ai.model` | 模型名称（留空时自动探测第一个可用模型） | `""` | 字符串 | 否 |
 | `ai.base_url` | 自定义接口地址（仅 `custom` 后端用） | `""` | URL | 否 |
 | `ai.api_key` | 自定义接口密钥（仅 `custom` 后端用） | `""` | 字符串 | 否 |
@@ -88,12 +94,11 @@ start 的顺序是 ball -> guard -> tts：
 `load_conf()` 的补全逻辑是**递归 setdefault**：文件里缺的键会用默认值补上，
 **但不会写回文件**。所以你看到 `fairy.json` 里只有少数几个组件是正常的。
 
-**坑 3：`ear` 开关是 `fairy_ear.py` 内置的，不在 `fairy.json` 里**
+**坑 3：`ear`（耳朵）已纳入 fairy.py 组件管理**
 
-`fairy.py` 的 `DEFAULT_CONF` 没有 `ear` 段，耳朵也不随 `fairy.py start` 启动（独立进程）。
-`tools/fairy_ear.py` 的开关是它自己内置的 `CFG["enabled"]`（默认 `true`，第 27 行），**不读 `fairy.json`**。
-
-**想关耳朵**：把 `fairy_ear.py` 顶部 `CFG` 里的 `"enabled"` 改成 `false`；或干脆不启动它。
+1.1.5 起，`ear` 是 `fairy.py` 的常驻组件之一，开关在 `fairy.json` 的 `components.ear`（默认 `true`），随 `fairy.py start` 一起启动。
+**想关耳朵**：把 `fairy.json` 的 `components.ear` 改成 `false`，或 `py -3.12 tools/fairy.py stop ear`。
+（旧版曾把开关内置在 `fairy_ear.py` 的 `CFG["enabled"]`，现已统一走 `fairy.json`。）
 
 ---
 

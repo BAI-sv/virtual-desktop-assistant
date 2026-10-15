@@ -125,9 +125,9 @@ x-fairy-voice: edge-tts-fallback     <- ★ 降级了，音色不对
 
 | 模块 | 一句话职责 | 关键点 |
 |---|---|---|
-| `fairy.py` | **唯一入口/总管**：启停组件、查状态、转发按需命令 | `COMPONENTS` 定义 4 个常驻组件；`CMDS` 定义 15 个按需命令 |
+| `fairy.py` | **唯一入口/总管**：启停组件、查状态、转发按需命令 | `COMPONENTS` 定义 10 个常驻组件；`CMDS` 定义 14 个按需命令 |
 
-**组件表**（`COMPONENTS`，4 个）：
+**组件表**（`COMPONENTS`，10 个）：
 
 | 组件名 | 脚本 | 匹配串 | 等待秒数 |
 |---|---|---|---|
@@ -135,8 +135,13 @@ x-fairy-voice: edge-tts-fallback     <- ★ 降级了，音色不对
 | `tts` | `indextts_start.py` | `indextts_server` | **75** |
 | `guard` | `indextts_guard.py` | `indextts_guard.py` | **6** |
 | `host` | `fairy_host.py` | `fairy_host.py` | 3（默认） |
+| `ear` | `fairy_ear.py` | `fairy_ear` | **8** |
+| `llm` | `fairy_llm.py` | Qwen3.5-9B-Uncensored… | **20** |
+| `vl` | `fairy_vl.py` | Qwen3-VL-8B-Instruct… | **20** |
+| `rim` | `fairy_rim.py` | `fairy_rim` | 3（默认） |
+| `chat` | `fairy_chat.py` | `fairy_chat` | 3（默认） |
 
-**按需命令**（`CMDS`，15 个）：
+**按需命令**（`CMDS`，14 个）：
 
 | 命令 | 实际调用 |
 |---|---|
@@ -152,6 +157,7 @@ x-fairy-voice: edge-tts-fallback     <- ★ 降级了，音色不对
 | `subtitle` | `video_subtitle.py --run --translate --subtitle` |
 | `call` | `call_translate.py --run` |
 | `cpu` | `cpu_watch.py` |
+| `ha` | `ha_bridge.py`（智能家居中枢：discover/act/state/watch） |
 
 ### 4.2 外形层
 

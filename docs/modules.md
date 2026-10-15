@@ -1,6 +1,6 @@
 # 模块清单
 
-`<FAIRY_ROOT>\tools\` 下共 **58 个 `.py`**（另有 `.bat` / `.yaml` / `.html` / 文档；下表为常用模块，完整清单以目录为准）。
+`<FAIRY_ROOT>\tools\` 下共 **100+ 个 `.py`**（另有 `.bat` / `.yaml` / `.html` / 文档；下表为早期常用模块，**1.1.5 新增模块见文末「十」**，完整清单以目录为准）。
 下表逐个说明：**一句话职责 + 关键点 + 什么时候用得上**。
 
 > 大小取自实测；职责来自各文件实现。
@@ -11,7 +11,7 @@
 
 | 模块 | 大小 | 职责 | 关键点 |
 |---|---|---|---|
-| **`fairy.py`** | 12.2 KB | ★ **唯一入口/总管** | `COMPONENTS`（4 个常驻组件）+ `CMDS`（16 个按需命令）；`start/stop/restart/status/log/config`；**启动时接管 stdout 到日志** |
+| **`fairy.py`** | 12.2 KB | ★ **唯一入口/总管** | `COMPONENTS`（10 个常驻组件）+ `CMDS`（14 个按需命令）；`start/stop/restart/status/log/config`；**启动时接管 stdout 到日志** |
 
 ---
 
@@ -110,6 +110,20 @@
 
 ---
 
+## 十、1.1.5 新增模块
+
+| 模块 | 职责 | 关键点 |
+|---|---|---|
+| `fairy_llm.py` | 本地文本引擎（8085） | llama.cpp（Vulkan）跑 Qwen3.5-9B，替代已卸载的 Ollama；启动器，被 fairy.py `llm` 组件管理 |
+| `fairy_vl.py` | 本地视觉引擎（8086） | Qwen3-VL-8B，可看图可对话；`--mmproj` 挂上 |
+| `fairy_chat.py` | 统一对话页（8090） | 四引擎网页对话（Strata / 文本9B / 视觉8B / 网络AI）+ 多模态输入（图片/文件/语音）+ 语音播报 + 上下文压缩 + 复制/分享 |
+| `fairy_rim.py` | 屏幕边缘 RGB 灯效 | 全屏透明灯带随模型状态变色；点击穿透、直角；纯 Win32 |
+| `fairy_capture.py` | 屏幕捕获 | 截图取帧；funasr 解释器定位（环境变量优先） |
+| `fairy_mic_source.py` | 麦克风源枚举 | 定位可用录音设备（供耳朵 / 唤醒用） |
+| `robot_bridge.py` | 机器人桥（安全层） | 六道闸 + 急停锁存 + 看门狗 + 参数限幅；`status/robots/do/say/estop/clear`；默认 mock 干跑 |
+| `robot/`（12 模块） | 机器人子系统 | `robot_safety`（安全层）/ `robot_skills`（技能）/ `robot_serial` / `robot_http` / `robot_mock` / `robot_ros2` / `robot_ui` 等；配置 `robot/robot.json` |
+| `ha_bridge.py` | 智能家居中枢 | Home Assistant：`fairy.py ha discover/act/state/watch` |
+| `ewelink_bridge.py` | ewelink 智能家居 | EWELINK 局域网协议（依赖 websocket-client，惰性导入） |
 
 ---
 

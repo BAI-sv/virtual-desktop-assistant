@@ -30,6 +30,11 @@ title: FairyX — 本地 AI 桌面助手
 | `tools/fairy_ball.py` | 桌面球：动画、进度面板、悬停气泡、右键菜单、语音、内存/显存/CPU 硬件条 |
 | `tools/fairy_ui.py` ＋ `strata_ui.html` | 助手窗口（三栏中文前端 + 反向代理） |
 | `tools/fairy_host.py` / `fairy_endpoints.py` | 本地服务（19388）与寻址降级中心 |
+| `tools/fairy_llm.py` / `fairy_vl.py` | 本地引擎：文本 8085（Qwen3.5-9B）、视觉 8086（Qwen3-VL-8B） |
+| `tools/fairy_chat.py` | 统一对话页 8090：四引擎网页对话 + 多模态输入 + 语音播报 + 压缩/复制/分享 |
+| `tools/fairy_rim.py` | 屏幕边缘 RGB 呼吸灯效（随本地模型状态变色） |
+| `tools/robot_bridge.py` ＋ `tools/robot/` | 机器人安全控制（六道闸 + 急停 + 看门狗，默认干跑） |
+| `tools/ha_bridge.py` / `ewelink_bridge.py` | 智能家居 Home Assistant 中枢 |
 | `tools/fairy_ear.py` / `fairy_wake_listen.py` | 唤醒词（Sherpa-ONNX KWS）+ 离线转写 + 语音授权 |
 | `tools/indextts_*.py` / `voice_cache.py` | 克隆音色合成、守护自愈、预合成缓存与音色审计 |
 | `tools/window_adapters.py` | 窗口对接：读内容 / 代打字（默认只读 + 六道安全闸） |
