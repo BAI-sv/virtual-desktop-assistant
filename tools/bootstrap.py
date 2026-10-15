@@ -277,7 +277,7 @@ def probe_tools():
     out["Ollama"] = bool(oll)
 
     # ---- 便携目录类：查特征目录（比名字匹配可靠）----
-    for name, dirs in (("GPT-SoVITS", [r"D:\GPT-SoVITS"]),
+    for name, dirs in (("GPT-SoVITS", [r"<GPT-SoVITS目录>"]),
                        ("ComfyUI", [r"D:\ComfyUI_windows_portable"],
                                 fairy_root.NAI_ROOT),
                        ("DevEco Studio", [r"C:\Program Files\Huawei\DevEco Studio"]),
