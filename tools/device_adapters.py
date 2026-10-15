@@ -410,22 +410,204 @@ class NearLinkAdapter(Adapter):
             return {"ok": False, "error": str(e)}
 
 
+# ==========================================================================
+# Home Assistant 中枢适配器（统一接 ewelink / 米家 / 美的 等智能设备）
+# ==========================================================================
+def _ha_token_file():
+    """从 logs/ha_token 读 HA 的 Long-Lived Access Token（无则空）。"""
+    try:
+        import os
+        import fairy_root
+        p = os.path.join(fairy_root.LOGS, "ha_token")
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    return ""
+
+
+class HomeAssistantAdapter(Adapter):
+    """Home Assistant 中枢（统一接 ewelink / 米家 / 美的 等智能设备）。
+
+    【为什么拿 HA 当中枢】
+      各家设备协议不互通（ewelink/米家/美的各走各的云）。Home Assistant
+      一个实例就能接上千种设备，对外统一暴露一套 REST API。FairyX 只认
+      HA 这一套接口，就能控制接入 HA 的全部设备 —— 这就是"连世界设备"的正路。
+
+    【双向联动】
+      球指令 -> 设备：act() 走 HA 的 service（turn_on/turn_off/set 等）
+      设备状态 -> 球播报：配 ha_bridge（轮询 /api/states，变化时调 /api/fairy/say）
+    """
+    name = "homeassistant"
+    protocol = "Home Assistant 中枢"
+    needs_account = True
+
+    def __init__(self, base=None, token=None):
+        import os
+        self.base = (base or os.environ.get("HA_BASE") or
+                     "http://127.0.0.1:8123").rstrip("/")
+        self.token = token or os.environ.get("HA_TOKEN") or _ha_token_file()
+
+    def _hdr(self):
+        return {"Authorization": "Bearer " + self.token,
+                "Content-Type": "application/json"}
+
+    def _get(self, path, timeout=8):
+        import json
+        import urllib.parse
+        import urllib.request
+        req = urllib.request.Request(
+            self.base + urllib.parse.quote(path, safe="/."), headers=self._hdr())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+
+    def _post(self, path, obj=None, timeout=8):
+        import json
+        import urllib.parse
+        import urllib.request
+        data = json.dumps(obj or {}).encode("utf-8")
+        req = urllib.request.Request(
+            self.base + urllib.parse.quote(path, safe="/."), data=data,
+            headers=self._hdr(), method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+            return json.loads(body) if body.strip() else {}
+
+    def _ready(self):
+        return bool(self.token)
+
+    def caps(self):
+        c = super().caps()
+        c.update({"actions": ["on", "off", "toggle", "set"],
+                  "discovery": "http",
+                  "account_note": "需要 HA 的 Long-Lived Access Token（写 logs/ha_token）"})
+        return c
+
+    def discover(self):
+        """把 HA 里所有 entity 变成 FairyX 设备。"""
+        if not self._ready():
+            return [{"id": "ha", "name": "Home Assistant（未配置 token）",
+                     "kind": "hub", "online": False, "error": "no_token"}]
+        try:
+            states = self._get("/api/states")
+        except Exception as e:
+            return [{"id": "ha", "name": "Home Assistant", "kind": "hub",
+                     "online": False, "error": str(e)[:80]}]
+        _internal = ("homeassistant", "person", "zone", "scene",
+                     "automation", "script", "group")
+        out = []
+        for st in states:
+            eid = st.get("entity_id", "")
+            if not eid:
+                continue
+            domain = eid.split(".")[0]
+            if domain in _internal:
+                continue
+            attr = st.get("attributes", {}) or {}
+            stt = st.get("state")
+            out.append({"id": eid, "name": attr.get("friendly_name") or eid,
+                        "kind": domain, "online": stt not in ("unavailable", "unknown"),
+                        "state": stt})
+        return out
+
+    def state(self, dev_id):
+        try:
+            st = self._get("/api/states/" + dev_id)
+            attr = st.get("attributes", {}) or {}
+            keep = {k: attr[k] for k in ("temperature", "current_temperature",
+                                         "brightness", "volume_level")
+                    if k in attr}
+            return {"ok": True, "state": st.get("state"),
+                    "friendly": attr.get("friendly_name", dev_id),
+                    "attributes": keep}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:100]}
+
+    def act(self, dev_id, action, params=None):
+        if not self._ready():
+            return {"ok": False, "error": "未配置 HA token（logs/ha_token）"}
+        domain = dev_id.split(".")[0]
+        try:
+            if action in ("on", "off", "toggle"):
+                svc = {"on": "turn_on", "off": "turn_off", "toggle": "toggle"}[action]
+                return self._service(domain, svc, dev_id)
+            if action == "set":
+                svc, data = self._resolve_set(domain, params or {})
+                return self._service(domain, svc, dev_id, data)
+            return {"ok": False, "error": "不支持的 action: %s" % action}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:100]}
+
+    def _service(self, domain, service, dev_id, data=None):
+        r = self._post("/api/services/%s/%s" % (domain, service),
+                       dict(data or {}, entity_id=dev_id))
+        return {"ok": True, "result": r}
+
+    def _resolve_set(self, domain, params):
+        if domain == "climate":
+            data = {}
+            if "temperature" in params:
+                data["temperature"] = params["temperature"]
+            if "hvac_mode" in params:
+                data["hvac_mode"] = params["hvac_mode"]
+            return "set_temperature", data
+        if domain == "light":
+            data = {}
+            if "brightness" in params:
+                data["brightness"] = int(params["brightness"])
+            if "color_temp" in params:
+                data["color_temp"] = int(params["color_temp"])
+            return "turn_on", data
+        return "turn_on", dict(params)
+
+
 ADAPTERS = {
     NearbyAdapter.name: NearbyAdapter(),
     BluetoothAudioAdapter.name: BluetoothAudioAdapter(),
     FairyBridgeAdapter.name: FairyBridgeAdapter(),
     SerialAdapter.name: SerialAdapter(),
     NearLinkAdapter.name: NearLinkAdapter(),
+    HomeAssistantAdapter.name: HomeAssistantAdapter(),
 }
+
+# ---------------------------------------------------------------------------
+# ★ 2026-10-15【机器人融合】把 tools\robot 那套接成这里的一个适配器
+#   为什么用"懒加载"而不是 import 时注册：
+#     · robot_bridge 会连带 import 机器人安全层/后端，启动时没必要付这个成本
+#     · 更重要的是：机器人那套【必须能在没有硬件、甚至没有 robot 目录时也不影响别的设备】
+#   失败要留痕（不静默）：_ROBOT_LOAD_NOTE 记录原因，discover_all 会带出来
+# ---------------------------------------------------------------------------
+_ROBOT_LOAD_NOTE = ""
+_ROBOT_TRIED = False
+
+
+def _ensure_robot_adapter():
+    """按需把机器人适配器装进 ADAPTERS（幂等；失败留痕，绝不抛）。"""
+    global _ROBOT_LOAD_NOTE, _ROBOT_TRIED
+    if "robot" in ADAPTERS:
+        return True
+    if _ROBOT_TRIED:
+        return False
+    _ROBOT_TRIED = True
+    try:
+        import robot_bridge as rb          # tools\robot_bridge.py
+        ADAPTERS[rb.as_device_adapter().name] = rb.as_device_adapter()
+        _ROBOT_LOAD_NOTE = "已接入（robot_bridge）"
+        return True
+    except Exception as e:
+        _ROBOT_LOAD_NOTE = "未接入: %s: %s" % (type(e).__name__, str(e)[:80])
+        return False
 
 
 def all_caps():
     """列所有协议的能力（给"以后接手表/汽车"做决策用）。"""
+    _ensure_robot_adapter()
     return {k: v.caps() for k, v in ADAPTERS.items()}
 
 
 def discover_all():
     """所有适配器一起发现（互不依赖，可以并行加线程）。"""
+    _ensure_robot_adapter()
     out = []
     for a in ADAPTERS.values():
         try:
@@ -435,6 +617,12 @@ def discover_all():
         except Exception as e:
             out.append({"adapter": a.name, "error": str(e)[:100]})
     return out
+
+
+def robot_note():
+    """机器人的接入情况（给体检/排障看）。"""
+    _ensure_robot_adapter()
+    return _ROBOT_LOAD_NOTE or ("已接入" if "robot" in ADAPTERS else "未接入")
 
 
 if __name__ == "__main__":

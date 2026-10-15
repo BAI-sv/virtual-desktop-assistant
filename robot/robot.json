@@ -1,0 +1,114 @@
+{
+  "_说明": "机器人子系统配置。改这个文件即生效（下次启动/下次调用时重读）；默认全是【干跑】，不会动硬件。",
+  "_怎么接真机": [
+    "1) 把 backend 从 mock 改成 serial / http / ros2，并在 backend_opts 里填端口或地址",
+    "2) 在 robots 段登记机器人 id（白名单），allow 里写允许的动作",
+    "3) 确认现场安全后，把 safety.dry_run 改成 false（或临时设环境变量 FAIRY_ROBOT_GO=1 只对本次生效）",
+    "4) 先跑：py -3.12 D:\\FAIRY\\tools\\robot\\robot_ui.py doctor  ->  再 selftest  ->  最后才 do"
+  ],
+  "enabled": true,
+  "backend": "mock",
+  "backend_opts": {
+    "_mock": "故障注入旋钮（只有 mock 后端认）：fail_act=raise|ok_false, silent_stop, state_lie, latency_s",
+    "_serial": "串口：{\"port\": \"COM7\", \"baud\": 115200}  不给 port 就自动找 CH340/CP210x 这类芯片",
+    "_http": "HTTP：{\"base\": \"http://192.168.124.50:8890\", \"token\": \"可选\"}",
+    "_ros2": "ROS2：{\"topics\": {\"cmd_topic\": \"/robot/cmd\", \"state_topic\": \"/robot/state\", \"stop_topic\": \"/robot/stop\"}, \"ros_setup\": \"C:\\\\dev\\\\ros2\\\\local_setup.bat\"}"
+  },
+  "estop": {
+    "pin_file": "",
+    "_pin_file": "外部急停开关的状态文件；文件里写 1/true/on 视为按下。留空=不用硬件急停（★ 真机必须接一个真开关）",
+    "hotkey": "ctrl+alt+f12",
+    "on_start": false
+  },
+  "safety": {
+    "max_speed_mps": 0.6,
+    "max_yaw_rps": 1.2,
+    "max_joint_torque": 0.6,
+    "max_reach_m": 0.55,
+    "max_duration_s": 30.0,
+    "min_battery_pct": 15,
+    "max_tilt_deg": 35.0,
+    "max_obstacle_m": 0.2,
+    "heartbeat_timeout_s": 2.0,
+    "_watchdog_说明": "断线联锁。真机后端(serial/http/ros2)+非干跑时默认自动开启；mock 或干跑时默认不开（要开就显式写 true）",
+    "dry_run": true
+  },
+  "gates": {
+    "whitelist": true,
+    "default_readonly": true,
+    "action_whitelist": true,
+    "danger_words": true,
+    "foreground": false,
+    "audit": true
+  },
+  "robots": {
+    "mock:arm-01": {
+      "name": "模拟机械臂",
+      "kind": "arm",
+      "enabled": true,
+      "allow": [
+        "move",
+        "walk",
+        "turn",
+        "grip",
+        "release",
+        "home",
+        "pick",
+        "place",
+        "look",
+        "stop",
+        "state"
+      ]
+    },
+    "mock:base-01": {
+      "name": "模拟底盘",
+      "kind": "wheeled",
+      "enabled": true,
+      "allow": [
+        "move",
+        "walk",
+        "turn",
+        "patrol",
+        "stand",
+        "sit",
+        "stop",
+        "state"
+      ]
+    }
+  },
+  "_robots_接真机的写法": {
+    "serial:COM7": {
+      "name": "我的小车",
+      "kind": "wheeled",
+      "enabled": true,
+      "allow": [
+        "move",
+        "turn",
+        "stop",
+        "state"
+      ]
+    },
+    "ros2:robot-01": {
+      "name": "Go2（等它到家再填）",
+      "kind": "quadruped",
+      "enabled": true,
+      "allow": [
+        "walk",
+        "stand",
+        "sit",
+        "stop",
+        "state"
+      ]
+    }
+  },
+  "skills": {
+    "_说明": "按技能名关掉：\"patrol\": false；也可按机器人关：\"mock:base-01.patrol\": false"
+  },
+  "audit": {
+    "max_mb": 8
+  },
+  "speak": {
+    "on_block": true,
+    "on_estop": true
+  }
+}

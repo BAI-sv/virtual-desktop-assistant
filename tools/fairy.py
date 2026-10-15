@@ -103,7 +103,9 @@ DEFAULT_CONF = {
                    "host": True,
                    # ★ 2026-10-11【统一管理】耳朵纳入 fairy.py：
                    #   语音唤醒/对话（SenseVoice）随 Fairy 一起启停
-                   "ear": True},
+                   "ear": True,
+                   # ★ 2026-10-15【屏幕边缘 RGB 灯效】随 Fairy 一起启停
+                   "rim": True},
     # ★★ 2026-10-10【黑窗】silent 名单：这些脚本一律用 pythonw.exe 起（不建控制台）。
     #   组件名（guard）或脚本名（indextts_guard.py）都认。
     #   ★ 之前只有 COMPONENTS 里写死的 silent 生效，guard/tts 永远用 python.exe
@@ -124,7 +126,7 @@ DEFAULT_CONF = {
     },
     "ball": {"speak": True, "bubble_seconds": 4, "brief_seconds": 18},
 # ★ 2026-10-09【删除桌宠组件】：
-    #   主程序 whale_pet.py 与 160MB 动画素材均为第三方，已移出（项目根下 _to_delete_whale\）。
+    #   主程序 whale_pet.py 与 160MB 动画素材均为第三方，已移出（本机待删目录）。
     #   本组件已移除；若以后恢复，请一并恢复自备素材。
     "advisor": {"enabled": True, "observe_min": 5, "min_gap_min": 10},
     "balance": {"warn_yuan": 30, "alert_yuan": 10},
@@ -194,9 +196,22 @@ COMPONENTS = {
     # ★ 2026-10-11【视觉引擎】本地视觉大脑（llama-server Vulkan，8085，
     #   Qwen3-VL-8B 可看图可对话）。ear.engine=llama 时 Fairy 大脑走这里。
     #   模型加载约 15 秒，wait_s 给 20；进程名是 llama-server。
-    "vl": {"script": "fairy_vl.py", "match": "llama-server",
-           "desc": "Fairy 视觉引擎（8085，Qwen3-VL-8B）",
+    # ★ 2026-10-15【本地文本引擎】替代已卸载的 Ollama：llama-server 跑 Qwen3.5-9B，8085。
+    "llm": {"script": "fairy_llm.py", "match": "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M",
+            "desc": "本地文本引擎（8085，Qwen3.5-9B 替代 Ollama）",
+            "wait_s": 20, "silent": True},
+    "vl": {"script": "fairy_vl.py", "match": "Qwen3-VL-8B-Instruct-abliterated",
+           "desc": "Fairy 视觉引擎（8086，Qwen3-VL-8B）",
            "wait_s": 20, "silent": True},
+    # ★ 2026-10-12【统一网页对话】8090：所有引擎的网页对话页（代理转发）。
+    #   Strata 用自带 8080 页面；Ollama/llm 引擎用这页。幂等常驻，不占资源。
+    "chat": {"script": "fairy_chat.py", "match": "fairy_chat",
+             "desc": "Fairy 统一对话页（8090，代理转发各引擎）",
+             "wait_s": 3, "silent": True},
+    # ★ 2026-10-15【屏幕边缘 RGB 灯效】全屏透明灯带，随模型运行状态呼吸变色。
+    "rim": {"script": "fairy_rim.py", "match": "fairy_rim",
+            "desc": "屏幕边缘呼吸 RGB 灯效（随模型状态变色）",
+            "wait_s": 3, "silent": True},
 }
 
 
@@ -230,9 +245,10 @@ def pids_of(match):
         ).splitlines() if x.strip().isdigit()]
         if ids:
             return ids
-        # 非 python 进程：按进程名模糊匹配
+        # 非 python 进程（llama-server / strata / ollama 等）：按命令行模糊匹配，
+        #   这样能区分多个同名引擎（如文本 9B 和视觉 8B 两个 llama-server）。
         return [x.strip() for x in _ps(
-            "@(Get-Process | Where-Object {$_.ProcessName -like '*%s*'}).Id" % match
+            "@(Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -like '*%s*'}).ProcessId" % match
         ).splitlines() if x.strip().isdigit()]
     # Linux：pgrep 按命令行匹配（引擎进程也能命中）
     return [x.strip() for x in _ps("pgrep -f '%s'" % match.replace("'", "'\\''"))
@@ -307,6 +323,20 @@ def stop_one(name):
         return 1
     print("✓ %s 已停（%d 个进程）" % (name, len(have)))
     return 0
+
+
+def _progress_bar(filled, total, width=26):
+    """★ 2026-10-12【启动进度条】深色风格，青色高亮（参考 NAI-晓 配色）。
+    控制台输出：[██████████--------] 45%。"""
+    pct = int(filled * 100 / total) if total else 100
+    n = int(filled * width / total) if total else width
+    n = max(0, min(n, width))
+    bar = ("\033[36m" + "█" * n + "\033[90m" + "─" * (width - n) + "\033[0m")
+    return "[%s] %3d%%" % (bar, pct)
+
+
+COMPONENT_NAMES = {"ball": "悬浮球", "guard": "TTS 守护", "tts": "语音合成",
+                   "host": "本地大脑", "ear": "语音耳朵", "vl": "视觉模型"}
 
 
 def stop_engines():
@@ -499,6 +529,7 @@ CMDS = {
     "subtitle": ("video_subtitle.py", ["--run", "--translate", "--subtitle"]),
     "call": ("call_translate.py", ["--run"]),
     "cpu": ("cpu_watch.py", []),
+    "ha": ("ha_bridge.py", []),   # Home Assistant 中枢：fairy.py ha discover/act/state/watch
 }
 
 
@@ -541,15 +572,28 @@ def main():
             _e, _mn, _ds = ensure_model_conf(conf)
             if _e:
                 _say_model_setup(_e, _mn, _ds)
-        targets = rest or [k for k, v in (conf.get("components") or {}).items() if v]
+        # ★ 2026-10-12【游戏模式开局】全套启动时不预拉视觉引擎（vl）：
+        #   球启动先进游戏模式会释放 8085，"起了又被杀"反而报错。
+        #   需要视觉时（切到 llm/视觉组合）球会自动拉起 8085；手动 start vl 仍可用。
+        _full = not rest
+        targets = rest or [k for k, v in (conf.get("components") or {}).items()
+                           if v and k != "vl"]
+        if _full and (conf.get("components") or {}).get("vl"):
+            print("· 视觉引擎：待命（游戏模式，切到视觉组合时自动启动）", flush=True)
         rc = 0
         started = []
-        for n in targets:
+        _total = len(targets)
+        for _i, n in enumerate(targets, 1):
             before = pids_of(COMPONENTS[n]["match"]) if n in COMPONENTS else []
+            _nm = COMPONENT_NAMES.get(n, n)
+            print("\r%s 启动 %s…" % (_progress_bar(_i - 1, _total), _nm),
+                  end="", flush=True)
             r = start_one(n, conf)
             rc |= r
             if r == 0 and n in COMPONENTS and pids_of(COMPONENTS[n]["match"]):
                 started.append(n)
+            print("\r%s ✓ %s 已启动  " % (_progress_bar(_i, _total), _nm), flush=True)
+        print()
         # ★ 2026-10-11：全量启动后播报一句（同类功能合并），不阻塞
         if not rest and started:
             _startup_say(started)
@@ -574,12 +618,22 @@ def main():
             _say_model_setup(_e, _mn, _ds)
         rc = 0
         started = []
-        for n, v in (conf.get("components") or {}).items():
-            if v:
-                r = start_one(n, conf)
-                rc |= r
-                if r == 0 and pids_of(COMPONENTS[n]["match"]):
-                    started.append(n)
+        # ★ 2026-10-12【游戏模式开局】全套重启同样不预拉视觉引擎（理由同 start）
+        _targets = [(n, v) for n, v in (conf.get("components") or {}).items()
+                    if v and n != "vl"]
+        if (conf.get("components") or {}).get("vl"):
+            print("· 视觉引擎：待命（游戏模式，切到视觉组合时自动启动）", flush=True)
+        _total = len(_targets)
+        for _i, (_n, _v) in enumerate(_targets, 1):
+            _nm = COMPONENT_NAMES.get(_n, _n)
+            print("\r%s 启动 %s…" % (_progress_bar(_i - 1, _total), _nm),
+                  end="", flush=True)
+            r = start_one(_n, conf)
+            rc |= r
+            if r == 0 and pids_of(COMPONENTS[_n]["match"]):
+                started.append(_n)
+            print("\r%s ✓ %s 已启动  " % (_progress_bar(_i, _total), _nm), flush=True)
+        print()
         if started:
             _startup_say(started)
         return rc
@@ -605,11 +659,24 @@ def main():
             print("✗ 找不到模块: %s" % script)
             return 1
         print("── %s ──────────────────────────────" % script)
-        # ★ 2026-10-10【黑窗】原来是 subprocess.call(...) 直接继承控制台：
-        #   父进程没控制台时（pythonw / 计划任务）它会新建一个 -> 弹窗。
-        #   加了 CREATE_NO_WINDOW 之后仍是同步等待、输出仍进同一份流（功能不变）。
-        return subprocess.call([PY, p] + args + rest, cwd=T,
-                               creationflags=CREATE_NO_WINDOW)
+        # ★ 2026-10-14【BUG 修复】原 subprocess.call(..., creationflags=CREATE_NO_WINDOW)
+        #   会把子进程 stdout 全部吞掉（实测 0 行输出）—— CREATE_NO_WINDOW 让 console
+        #   子进程写进隐藏控制台，父进程管道收不到。改 capture_output 手动写回：
+        #   既保留「无黑窗」，又不丢输出。
+        try:
+            r = subprocess.run([PY, p] + args + rest, cwd=T, capture_output=True,
+                               creationflags=CREATE_NO_WINDOW, timeout=900)
+        except subprocess.TimeoutExpired:
+            print("✗ 命令超时（>15 分钟）：%s" % p, flush=True)
+            return 1
+        try:
+            sys.stdout.buffer.write(r.stdout)
+            sys.stdout.buffer.write(r.stderr)
+            sys.stdout.buffer.flush()
+        except Exception:
+            print((r.stdout or b"").decode("utf-8", "replace"), flush=True)
+            print((r.stderr or b"").decode("utf-8", "replace"), flush=True)
+        return r.returncode
     print("✗ 未知命令: %s" % c)
     print("   跑 `fairy.py help` 看全部命令")
     return 2

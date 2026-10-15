@@ -1,19 +1,19 @@
-"""Fairy 视觉引擎启动器：llama-server（Vulkan）跑 Qwen3-VL-8B，端口 8085。
+"""Fairy 视觉引擎启动器：llama-server（Vulkan）跑 Qwen3-VL-8B，端口 8086。
 
-被 fairy.py 的 vl 组件调用；8085 已在监听时自动跳过。
-底层是 llama.cpp Vulkan 后端（A 卡实测 GPU 加速，看图约 0.6 秒）。
-模型文件：Qwen3-VL-8B Q4_K_M + mmproj Q8_0（路径见下方配置）。
+被 fairy.py 的 vl 组件调用；8086 已在监听时自动跳过。
+底层是 llama.cpp Vulkan 后端（AMD 9070 XT 实测 GPU 加速，看图 0.6 秒）。
+模型文件：F 盘 ComfyUI 模型库（Qwen3-VL-8B Q4_K_M + mmproj Q8_0）。
 """
 import os
 import socket
 import subprocess
 import sys
 
-# 本机路径请在下方配置（或改从 config.json 的 paths 读取）：
-LLAMA = r"<llama.cpp 目录>\llama-server.exe"
-MODEL = r"<Qwen3-VL-8B 模型 GGUF 路径>"
-MMPROJ = r"<Qwen3-VL-8B mmproj 路径>"
-PORT = 8085
+# ★ 换机器可跑：用环境变量 VL_LLAMA_SERVER / VL_MODEL / VL_MMPROJ 覆盖，或改成你自己的路径。
+LLAMA = os.environ.get("VL_LLAMA_SERVER", r"<llama.cpp目录>\llama-server.exe")
+MODEL = os.environ.get("VL_MODEL", r"<你的模型目录>\Qwen3-VL-8B-Instruct-abliterated.Q4_K_M.gguf")
+MMPROJ = os.environ.get("VL_MMPROJ", r"<你的模型目录>\Qwen3-VL-8B-Instruct-abliterated.mmproj-Q8_0.gguf")
+PORT = 8086
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fairy_vl.log")
 
 
@@ -27,7 +27,7 @@ def alive():
 
 def main():
     if alive():
-        print("[vl] 8085 已在监听，跳过")
+        print("[vl] %s 已在监听，跳过" % PORT)
         return 0
     if not os.path.exists(LLAMA):
         print("[vl] 缺 llama-server: %s" % LLAMA)
@@ -36,12 +36,14 @@ def main():
         print("[vl] 缺视觉模型: %s" % MODEL)
         return 2
     try:
-        DETACHED = 0x00000008 | 0x00000100
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW —— 三重压制，
+        # 确保 llama-server（控制台程序）启动也不弹任何黑窗。
+        DETACHED = 0x00000008 | 0x00000200 | 0x08000000
         subprocess.Popen(
             [LLAMA, "-m", MODEL, "--mmproj", MMPROJ,
              "--port", str(PORT), "--host", "127.0.0.1",
              "--alias", "qwen3-vl-8b", "-ngl", "99", "--ctx-size", "8192"],
-            creationflags=DETACHED | subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=DETACHED,
             stdout=open(LOG, "w", encoding="utf-8"),
             stderr=subprocess.STDOUT,
             cwd=os.path.dirname(LLAMA))

@@ -38,6 +38,7 @@ import fairy_endpoints as ep
 import threading as _threading          # ★ KWS 版：whisper 后台预加载用
 import asr_bridge                       # ★ 2026-10-11：语音识别后端（SenseVoice / Paraformer）
 import fairy_memory                      # ★ 2026-10-11：使用记忆与习惯学习（热词/常用功能/上下文）
+import fairy_mic_source                  # ★ 2026-10-12：兜底麦克风源（系统输入引擎异常时走 WDM-KS rec 轮询）
 
 T = os.path.dirname(os.path.abspath(__file__))
 LOG = fairy_root.LOGS
@@ -57,6 +58,14 @@ _SPEAKING = False            # Fairy 是否正在播报（主循环据此允许�
 _HIST = []                   # 本轮对话历史 [(user, asst), ...]（最近 8 轮）
 _HIST_MAX = 8
 _INTERRUPT_GATE = 0.02       # 打断门限：播放中麦克风 RMS 超过它视为插话
+
+# ★ 2026-10-12【自适应底噪门限】部分 USB 麦带恒定底噪（实测 RMS≈0.2、峰值≈0.32），
+#   固定门限（rms_gate=0.001、打断 0.02）会被噪声永远顶穿：
+#   -> 一直误判"有人声"收集 8 秒噪声、转写出乱码，还把 Fairy 的播报反复打断。
+#   改为跟踪滚动底噪（低百分位），人声/插话必须明显高于底噪才触发。
+_ADAPT_WIN = 40              # 滚动窗块数（0.1s/块 → 4 秒）
+_ADAPT_PCT = 25              # 底噪取第 25 百分位（抗突发噪声）
+_ADAPT_RATIO = 1.5           # 触发倍数：超过底噪 1.5 倍才算"有声音"
 # 从记忆恢复上次对话（跨重启接续）
 try:
     _mem0 = fairy_memory.load()
@@ -85,7 +94,7 @@ CFG = {
     #           每次只拿到半个字，日志实证「听到「by bwd6」」「听到「拜拜」」！
     #   新逻辑：说到【停】才切 —— 门限通过就开始收集，继续收；
     #           连续安静 >= tail_silence 或 总长 >= max_utt 才结束这一段。
-    "tail_silence": 3.0,     # 停顿 3 秒 = 这一段说完了（说完才回复）
+    "tail_silence": 0.5,     # ★ 2026-10-12【说完即答】停顿 0.5 秒 = 这一段说完了（说完才回复）
     "max_utt": 8.0,          # 单段最长（对话模式要够说一整句）
     "min_utt": 0.35,         # 一段短于这个就当噪声丢弃
     "lead_pad": 0.15,        # 裁首尾静音时保留的余量（whisper 对纯静音会幻觉）
@@ -98,6 +107,10 @@ CFG = {
     "cooldown": 2.0,         # 应答后的冷却（原 6.0，太久了）
     "dialogue": True,        # ★ 连续对话：唤醒后不关麦，继续听指令
     "dialogue_idle": 8.0,    # 对话模式里 8 秒没说话 -> 退回只等唤醒
+    # ★ 2026-10-12【按键说话】按住按键说话、松开即识别并回复。
+    #   key: 鼠标侧键 xbutton1(前进)/xbutton2(后退)；也可用键盘单键名(如 f2)
+    #   alt_key: 键盘组合快捷键，如 ctrl+alt+v / ctrl+shift+f
+    "ptt": {"enabled": True, "key": "xbutton1", "alt_key": "ctrl+alt+v"},
     "stt_mode": "A",         # A=zh+偏置提示 B=自动语言+提示 C=zh 无提示
     "model": "small",
     # ================= ★★ 2026-10-09 换唤醒方式：Sherpa-ONNX KWS =================
@@ -108,7 +121,7 @@ CFG = {
     # KWS：模型仅 4.8MB、每 0.1 秒块 1.36ms（73 倍实时）、
     #      实测 10/12 命中（83%）、0/20 误报。
     "kws": True,             # True=用 KWS 做唤醒判定；False=退回老的"门限+whisper"
-    "kws_threshold": 0.06,   # ★ 实测：0.30->8/12 · 0.20->9/12 · 0.10->10/12 · 0.05->10/12
+    "kws_threshold": 0.04,   # ★ 2026-10-12：0.06 唤醒太苛刻（USB 麦信号弱），降到 0.04 更易命中
     "kws_score": 1.0,        # ★ 实测【完全无影响】(1.0/2.0/4.0 一样) -> 别去调它
     "kws_zh": True,          # 挂中文模型(wenetspeech)一起听；用户喊"Fairy"中文口音更易命中
 }
@@ -134,7 +147,9 @@ STT_MODES = {
 
 # ---- 连续对话用的大脑（本机 Ollama）----
 OLLAMA = "http://127.0.0.1:11434"
-OLLAMA_MODEL = "qwen3:30b-a3b"
+# ★ 2026-10-12【模型名修正】实际安装 tag 是 qwen3-30b-a3b:latest（不是 qwen3:30b-a3b），
+#   名字对不上 ollama 会直接报 "model not found"，Fairy 就"不搭理"。
+OLLAMA_MODEL = "qwen3-30b-a3b"
 SAY_URL = "<动态：ep.tts_get() 内部按降级链选择>"     # 见 fairy_endpoints.py
 
 # ---- 唤醒词候选（ASR 把 Fairy 转成的字很不确定，必须宽松）----
@@ -261,7 +276,11 @@ def load_cfg():
             j = json.load(open(p, encoding="utf-8"))
             e = j.get("ear") or {}
             for k, v in e.items():
-                if k in CFG:
+                if k not in CFG:
+                    continue
+                if isinstance(v, dict) and isinstance(CFG[k], dict):
+                    CFG[k].update(v)   # ★ 2026-10-12：嵌套配置（如 ptt）浅合并，可只改单个键
+                else:
                     CFG[k] = v
     except Exception as ex:
         log("读配置失败（用默认）: %s" % ex)
@@ -284,36 +303,17 @@ def load_logic():
 
 # ---------------------------------------------------------------- 设备
 def list_inputs():
-    """返回可用的录音设备列表，并标注回环/建议。（用 PyAudio 枚举）"""
-    import pyaudio
-    out = []
-    _pa = pyaudio.PyAudio()
-    try:
-        for i in range(_pa.get_device_count()):
-            d = _pa.get_device_info_by_index(i)
-            if d["maxInputChannels"] <= 0:
-                continue
-            n = d["name"]
-            lo = ("立体声混音" in n) or ("Stereo Mix" in n) or ("Stereo input" in n)
-            kind = "回环(不可用)" if lo else ("蓝牙免提" if "Hands-Free" in n else
-                   ("USB" if "USB" in n.upper() else ("线路" if "Line" in n or "线路" in n else "其他")))
-            if "Mapper" in n or "主声音" in n:
-                continue
-            out.append({"index": i, "name": n, "lo": lo, "kind": kind,
-                        "ch": d["maxInputChannels"], "rate": int(d["defaultSampleRate"])})
-    finally:
-        _pa.terminate()
-    return out
+    """返回可用的录音设备列表，并标注回环/建议。
+    ★ 2026-10-12：改用 fairy_mic_source（sounddevice 枚举 WDM-KS 输入），
+    不再依赖 PyAudio/MME —— 系统输入引擎异常时 MME 枚举为空。"""
+    return fairy_mic_source.list_inputs()
 
 
 def pick_input(devs):
-    """挑一个真麦克风（优先板载/线路/USB，蓝牙免提排最后——它常打不开独占流）。"""
-    real = [d for d in devs if not d["lo"]]
-    if not real:
-        return None
-    order = {"线路": 0, "其他": 1, "USB": 2, "蓝牙免提": 9}
-    real.sort(key=lambda d: order.get(d["kind"], 9))
-    return real[0]
+    """挑一个真麦克风。
+    ★ 2026-10-12：用 fairy_mic_source.pick_input —— 逐个 rec 试开、
+    选信号最强的可用设备（麦克风/线路优先，蓝牙免提最后）。"""
+    return fairy_mic_source.pick_input(devs)
 
 
 def cmd_list():
@@ -499,7 +499,7 @@ KWS_ZH_RULE = "n \u01d0 h \u01ceo f a i r y :1.0 @\u4f60\u597dfairy"
 KWS_HOP_S = 0.1                      # ★ 硬要求：1600 采样 @16k
 # ★ 2026-10-12【唤醒灵敏度】USB/免提麦克风信号偏弱（静默峰值仅 0.06~0.2），
 #   喂 KWS 前放大，提升"喊 Fairy"的命中率；打断门限仍用原始信号。
-KWS_GAIN = float(os.environ.get("FAIRY_KWS_GAIN", "4.0"))
+KWS_GAIN = float(os.environ.get("FAIRY_KWS_GAIN", "8.0"))
 
 
 def _kws_build(base, rule_text, tag):
@@ -529,6 +529,88 @@ def _kws_build(base, rule_text, tag):
         keywords_score=float(CFG.get("kws_score", 1.0)),
         keywords_threshold=float(CFG.get("kws_threshold", 0.10)),
         provider="cpu")
+
+
+_PTT = {"down": False, "was": False}   # down=按键正按住；was=本段由按键触发
+
+
+def ptt_listener():
+    """★ 2026-10-12【按键说话】全局热键监听（后台线程）：
+    按住鼠标侧键（xbutton1/xbutton2）或键盘组合键说话，松开即识别回复。
+    只改 _PTT 标志，主循环每块轮询。"""
+    try:
+        from pynput import keyboard as _kb, mouse as _ms
+    except Exception:
+        log("⚠ 按键说话不可用（未安装 pynput）—— 已跳过")
+        return
+    _cfg = CFG.get("ptt") or {}
+    if not _cfg.get("enabled", True):
+        return
+    _key = (_cfg.get("key") or "xbutton1").lower().strip()
+    _alt = [x.strip().lower() for x in (_cfg.get("alt_key") or "ctrl+alt+v").split("+") if x.strip()]
+    _xmap = {"xbutton1": ("x1", "button.x1"), "xbutton2": ("x2", "button.x2")}
+    _mods = set()
+
+    def _is_key(n):
+        n = (n or "").lower()
+        if _key in _xmap:
+            return n in _xmap[_key]
+        return n == _key
+
+    def _press(key):
+        try:
+            n = getattr(key, "name", None)
+            if n is None and hasattr(key, "char"):
+                n = key.char
+            n = (n or "").lower()
+            if n in ("ctrl", "alt", "shift"):
+                _mods.add(n)
+                return
+            if _is_key(n):
+                _PTT["down"] = True
+                log("★ 按键说话：按住（%s）" % (key))
+            elif n and n in _alt and _mods >= {x for x in _alt if x not in ("ctrl", "alt", "shift")}:
+                _PTT["down"] = True
+                log("★ 按键说话：按住（%s）" % "+".join(_alt))
+        except Exception:
+            pass
+
+    def _release(key):
+        try:
+            n = getattr(key, "name", None)
+            if n is None and hasattr(key, "char"):
+                n = key.char
+            n = (n or "").lower()
+            if n in ("ctrl", "alt", "shift"):
+                _mods.discard(n)
+                return
+            if _PTT["down"] and (_is_key(n) or (n and n in _alt)):
+                _PTT["down"] = False
+                log("★ 按键说话：松开 -> 识别并回复")
+        except Exception:
+            pass
+
+    def _m_click(_x, _y, _b, _p):
+        try:
+            _n = getattr(_b, "name", None) or str(_b).split(".")[-1]
+            if _is_key(_n):
+                if _p:
+                    _PTT["down"] = True
+                    log("★ 按键说话：按住（鼠标 %s）" % _n)
+                else:
+                    _PTT["down"] = False
+                    log("★ 按键说话：松开 -> 识别并回复")
+        except Exception:
+            pass
+    try:
+        _kl = _kb.Listener(on_press=_press, on_release=_release)
+        _ml = _ms.Listener(on_click=_m_click)
+        _kl.start()
+        _ml.start()
+        _kl.join()
+        _ml.join()
+    except Exception as _e:
+        log("按键说话监听退出: %s" % _e)
 
 
 def _wakeword_rules():
@@ -662,6 +744,38 @@ def asr_ready():
 
 
 
+def _denoise(arr, rate=16000, thr=2.0):
+    """★ 2026-10-12【谱减降噪】scipy STFT 谱减法：
+    用整段能量最低的 15% 帧估计噪声谱，低于阈值倍数的频率成分衰减，
+    去掉耳机底噪/电流干扰后还原波形。纯 CPU，转写前调用。
+    """
+    import numpy as np
+    try:
+        from scipy.signal import stft, istft
+    except Exception:
+        return arr
+    _n = len(arr)
+    if _n < rate // 2:
+        return arr
+    _seg = 512
+    _hop = _seg // 2
+    _f, _t, _Z = stft(arr, fs=rate, nperseg=_seg, noverlap=_hop)
+    _m = np.abs(_Z)
+    _e = np.mean(_m ** 2, axis=0)
+    _nb = max(1, int(_e.shape[0] * 0.15))
+    _idx = np.argsort(_e)[:_nb]
+    _noise = np.median(_m[:, _idx], axis=1, keepdims=True) + 1e-9
+    _mask = _m / _noise
+    _g = np.clip((_mask - thr) / (thr * 0.8), 0.0, 1.0)
+    _g = np.minimum(_g, 1.0)
+    try:
+        _g = (np.roll(_g, 1, axis=1) + _g + np.roll(_g, -1, axis=1)) / 3.0
+    except Exception:
+        pass
+    _out = istft(_Z * _g, fs=rate, nperseg=_seg, noverlap=_hop)[1]
+    return np.ascontiguousarray(_out[:_n], dtype="float32")
+
+
 def transcribe(audio, mode=None):
     """把 numpy float32 16k 音频转成文字。
 
@@ -669,11 +783,32 @@ def transcribe(audio, mode=None):
     ★★ 2026-10-11：识别后端已从 faster-whisper 换成阿里 SenseVoice
        （asr_bridge，sherpa-onnx 引擎）—— 中文接近手机端侧水平、
        自动带标点、CPU 实时、免 torch。mode 参数保留以兼容调用方。
+    ★★ 2026-10-12【识别增益】SenseVoice 对低音量语音容易转成句号/漏字：
+       按峰值自动归一化放大（峰值 <0.5 时放大到 ~0.9），噪声由 ASR 自身过滤。
     """
     import numpy as np
     arr = np.asarray(audio, dtype="float32")
+    if arr.size == 0:
+        return ""
+    # ★ 2026-10-12【降噪】耳机麦干扰/底噪先去噪，再做高通与归一化
+    arr = _denoise(arr)
+    # ★ 2026-10-12【去底噪 + 归一化】麦克风底噪比人声还响时（实测峰值 0.05 vs
+    #   人声 RMS 0.036），SenseVoice 只会转成句号。先 FFT 高通去掉低频底噪，
+    #   再按峰值归一化放大到 ~0.9，让语音相对噪声突出。
+    _n = len(arr)
+    if _n > 256:
+        try:
+            _f = np.fft.rfft(arr)
+            _fr = np.fft.rfftfreq(_n, 1.0 / 16000)
+            _f[_fr < 120] = 0.0
+            arr = np.fft.irfft(_f, _n).astype("float32")
+        except Exception:
+            pass
+    _peak = float(np.max(np.abs(arr))) + 1e-9
+    if _peak < 0.5:
+        arr = arr * (0.9 / _peak)
     text, _used, _cost = asr_bridge.recognize(arr, 16000, "sensevoice")
-    return text
+    return (text or "").strip()
 
 
 def trim_silence(a, rate, gate, pad):
@@ -792,9 +927,47 @@ def ask_llama(text, timeout=120, history=None):
     return out
 
 
+_VOICE_MODE = None   # None=跟随 fairy.json prefer / local=本地优先 / dsh=网络优先
+
+def _voice_switch_cmd(text):
+    """语音命令：'用本地AI'/'用网络AI' 切换问答后端。返回确认话术或 None。"""
+    t = (text or "").strip().lower()
+    global _VOICE_MODE
+    if any(k in t for k in ("用本地", "本地ai", "切换本地", "用本地模型", "本地大脑", "本地回答")):
+        _VOICE_MODE = "local"
+        return "已切换到本地 AI，本地模型优先，不可用时自动转网络"
+    if any(k in t for k in ("用网络", "网络ai", "切换网络", "用网络模型", "在线ai", "联网回答")):
+        _VOICE_MODE = "dsh"
+        return "已切换到网络 AI，DSH 在线优先"
+    if any(k in t for k in ("用自动", "自动ai", "自动选择", "恢复自动")):
+        _VOICE_MODE = None
+        return "已恢复自动选择"
+    return None
+
+
 def ask_brain(text, timeout=120, history=None):
-    """★ 2026-10-12【分层大脑】本地优先，本地全失败自动切在线降级链：
-       本地（llama / ollama）-> DSH -> 豆包（配置了 key 才启用）。"""
+    """★ 2026-10-12【分层大脑 + DSH 优先】
+       prefer=dsh -> 语音文本【实时发 DSH 云端】回答（ep.ask_get：push->同步回复），
+                     DSH 失败再回本地引擎；
+       其他        -> 本地（llama / ollama）优先，本地全失败自动切在线降级链。"""
+    _cmd = _voice_switch_cmd(text)
+    if _cmd:
+        return _cmd
+    _pref = "local"
+    try:
+        _pref = ((_VOICE_MODE or "") or (ep.prefer() or "") or "local").lower()
+    except Exception:
+        pass
+    if _pref == "dsh":
+        # ★ dsh 模式：DSH 云端优先回答（“我说的话实时传给 DSH”的目标链路）
+        try:
+            _r = ep.ask_get(text, history=history, timeout=timeout)
+            if _r:
+                _ans, _src = _r
+                log("[ear] DSH 云端回答（来源=%s）" % _src)
+                return _ans
+        except Exception as _e:
+            log("[ear] DSH 回答失败（%s）-> 回本地引擎" % _e)
     _eng = (CFG.get("engine") or "llama").strip()
     try:
         if _eng == "ollama":
@@ -806,11 +979,12 @@ def ask_brain(text, timeout=120, history=None):
         return ask_ollama(text, timeout=timeout, history=history)
     except Exception as _e2:
         log("[ear] 本地模型全部不可用（%s）-> 转在线降级链" % _e2)
-    r = ep.ask_get(text, history=history, timeout=timeout)
-    if r:
-        ans, src = r
-        log("[ear] 在线降级回答（来源=%s）" % src)
-        return ans
+    if _pref != "dsh":
+        r = ep.ask_get(text, history=history, timeout=timeout)
+        if r:
+            ans, src = r
+            log("[ear] 在线降级回答（来源=%s）" % src)
+            return ans
     raise RuntimeError("本地与在线大脑都不可用（%s）" % text[:40])
 
 
@@ -863,6 +1037,33 @@ def synth_to_file(text):
     print("[ear] 语音=克隆路由(%s|%s) %d 字节"
           % (r.get("voice"), r.get("route"), len(data)), flush=True)
     return p
+
+
+def _autofix_mic():
+    """★ 2026-10-12【削波自愈】默认麦克风持续满格(峰值≈1.0)时自动降音量。
+
+    返回 ("lowered", 之前音量, 之后音量) 或 ("still", 当前音量) 或 ("err", 信息)。
+    音量 0.4 足够唤醒（ear 会给 KWS 再放大），又不至于被耳机干扰顶到削波。
+    """
+    try:
+        import comtypes
+        from ctypes import cast, POINTER
+        from comtypes import CLSCTX_ALL
+        from pycaw.constants import CLSID_MMDeviceEnumerator
+        from pycaw.api.mmdeviceapi import IMMDeviceEnumerator
+        from pycaw.api.endpointvolume import IAudioEndpointVolume
+        _enum = comtypes.CoCreateInstance(
+            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, comtypes.CLSCTX_ALL)
+        _dev = _enum.GetDefaultAudioEndpoint(1, 0)
+        _ev = _dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        _epv = cast(_ev, POINTER(IAudioEndpointVolume))
+        _cur = float(_epv.GetMasterVolumeLevelScalar())
+        if _cur > 0.5:
+            _epv.SetMasterVolumeLevelScalar(0.4, None)
+            return ("lowered", _cur, 0.4)
+        return ("still", _cur)
+    except Exception as _e:
+        return ("err", str(_e)[:80])
 
 
 def speak_text(text):
@@ -951,27 +1152,9 @@ def cmd_run(seconds=0):
     if dev is None:
         log("✗ 没有可用的真麦克风（只有回环）—— 请连耳机/麦克风")
         return 2
-    # ★ 蓝牙免提等设备可能打不开独占流（PortAudio -9999），逐个试开、回退到下一个可用麦克风
-    _cands = [dev] + [d for d in devs if d["index"] != dev["index"] and not d["lo"]]
-    _ok = None
-    import pyaudio as _pa_mod
-    _pa0 = _pa_mod.PyAudio()
-    try:
-        for _c in _cands:
-            try:
-                _st0 = _pa0.open(format=_pa_mod.paFloat32, channels=1,
-                                 rate=int(CFG["rate"]), input=True,
-                                 input_device_index=_c["index"],
-                                 frames_per_buffer=int(int(CFG["rate"]) * KWS_HOP_S))
-                _st0.read(800, exception_on_overflow=False)
-                _st0.stop_stream()
-                _st0.close()
-                _ok = _c
-                break
-            except Exception:
-                continue
-    finally:
-        _pa0.terminate()
+    # ★ 2026-10-12：改用 fairy_mic_source 试开（WDM-KS rec 直读），
+    #   不再依赖 PyAudio/MME 持续流（系统输入引擎异常时全打不开）。
+    _ok = fairy_mic_source.pick_input([dev] + [d for d in devs if d["index"] != dev["index"] and not d["lo"]])
     if _ok is None:
         log("✗ 所有麦克风都打不开（被其他程序独占或驱动问题）—— 稍后再试")
         # ★ 2026-10-12【无麦提醒】推给 host -> 球轮询念出："没有语音输入设备"
@@ -1021,19 +1204,13 @@ def cmd_run(seconds=0):
             warm_asr_async()
         else:
             log("连续对话已关 -> 不预加载语音识别模型")
-        import pyaudio as _pa_mod
+        # ★ 2026-10-12：音频源改 fairy_mic_source（WDM-KS rec 轮询，兼容 read 接口）
         import atexit
-        _pa = _pa_mod.PyAudio()
-        st = _pa.open(format=_pa_mod.paFloat32, channels=1, rate=rate,
-                      input=True, input_device_index=dev["index"], frames_per_buffer=hop)
+        st = fairy_mic_source.FairyMicSource(dev, rate=rate, hop=hop)
 
         def _cleanup_pa():
             try:
-                st.close()
-            except Exception:
-                pass
-            try:
-                _pa.terminate()
+                st.stop()
             except Exception:
                 pass
         atexit.register(_cleanup_pa)
@@ -1044,6 +1221,14 @@ def cmd_run(seconds=0):
             _th.Thread(target=_announce_ready, daemon=True).start()
         except Exception:
             pass
+        # ★ 2026-10-12【按键说话】全局热键监听线程（鼠标侧键 / Ctrl+Alt+V）
+        try:
+            _ptt_cfg = CFG.get("ptt") or {}
+            _th.Thread(target=ptt_listener, daemon=True).start()
+            log("按键说话：已监听（按住 %s 或 %s 说话，松开识别）"
+                % (_ptt_cfg.get("key", "xbutton1"), _ptt_cfg.get("alt_key", "ctrl+alt+v")))
+        except Exception as _e_ptt:
+            log("按键说话监听启动失败: %s" % _e_ptt)
         # ================= 主循环 =================
         buf = []                 # 当前这一段收集到的音频
         silent = 0.0             # 这一段里连续安静了多久
@@ -1054,6 +1239,12 @@ def cmd_run(seconds=0):
         last_voice = time.time()
         hold_until = 0.0         # ★ 自说自话保护：这段时间内不采集/不喂KWS
         mic_peak = 0.0           # ★ 这段时间内麦克风的最大幅度（用于判“麦克风有没有声音”）
+        _sat_cnt = 0             # ★ 2026-10-12【削波自愈】连续“满格”窗口计数
+        _sat_last_fix = 0.0      # 上次自动降麦克风音量的时间（10 分钟内不重复）
+        _rms_hist = []           # ★ 2026-10-12【自适应底噪】最近块的 RMS / 峰值
+        _peak_hist = []
+        _floor_rms = 0.0
+        _floor_peak = 0.0
         t0 = time.time()
         log("模式=端点检测(tail=%.1fs max=%.1fs) · 对话=%s · STT=%s · 块=%.2fs"
             % (CFG["tail_silence"], CFG["max_utt"],
@@ -1062,10 +1253,25 @@ def cmd_run(seconds=0):
         while True:
             if seconds and time.time() - t0 >= seconds:
                 break
-            blk = np.frombuffer(st.read(hop, exception_on_overflow=False),
-                                dtype=np.float32).reshape(-1, 1)
+            _raw = st.read(hop, exception_on_overflow=False)
+            if isinstance(_raw, np.ndarray):
+                blk = _raw.reshape(-1, 1)
+            else:
+                blk = np.frombuffer(_raw, dtype=np.float32).reshape(-1, 1)
             a = blk[:, 0]
             now = time.time()
+            # ★ 2026-10-12【自适应底噪】每块算 RMS/峰值，滚动更新噪声底
+            #   （P25 抗突发噪声；说话时也持续跟踪，说完自动回落）。
+            rms_blk = float(np.sqrt(np.mean(a * a)) + 1e-12)
+            pk_blk = float(np.max(np.abs(a)))
+            _rms_hist.append(rms_blk)
+            _peak_hist.append(pk_blk)
+            if len(_rms_hist) > _ADAPT_WIN:
+                _rms_hist.pop(0)
+                _peak_hist.pop(0)
+            if len(_rms_hist) >= 10:
+                _floor_rms = float(np.percentile(_rms_hist, _ADAPT_PCT))
+                _floor_peak = float(np.percentile(_peak_hist, _ADAPT_PCT))
             _update_speaking()      # ★ 2026-10-11：播放自然结束则清标记
 
             # ---------- ★ 自说自话保护：读掉但不收集 ----------
@@ -1087,7 +1293,8 @@ def cmd_run(seconds=0):
                 #    进入收集（尊重用户，不忽略）。
                 if _SPEAKING:
                     lv = float(np.max(np.abs(a)))
-                    if lv > _INTERRUPT_GATE:
+                    # ★ 2026-10-12：噪声底以上才算插话（恒定底噪不再反复打断播报）
+                    if lv > max(_INTERRUPT_GATE, _floor_peak * _ADAPT_RATIO):
                         stop_current_play()
                         log("★ 检测到插话 -> 已打断 Fairy 播报，请说")
                         hold_until = now + 0.4   # 给播放器收尾时间
@@ -1115,6 +1322,7 @@ def cmd_run(seconds=0):
                         log("KWS 命中但冷却中（间隔 %.1fs < %.1fs）-> 忽略"
                             % (gap, CFG["cooldown"]))
             if woke:
+                stop_current_play()   # ★ 2026-10-12：唤醒即打断任何播报（含球端启动播报）
                 last_idx = pick_answer(logic, ANSWER_POOL, last_idx)
                 say = ANSWER_POOL[last_idx % len(ANSWER_POOL)]
                 route = speak_text(say)
@@ -1143,7 +1351,15 @@ def cmd_run(seconds=0):
             # 什么时候需要：
             #   · 对话模式下——要听用户说指令
             #   · KWS 不可用时——还要兼任唤醒判定（老路子）
-            need_ep = (mode == "dialogue" and CFG.get("dialogue", True)) or (not engines)
+            #   · 按键说话按下时——强制收集
+            ptt_down = _PTT.get("down", False)
+            if ptt_down and mode != "ptt":
+                mode = "ptt"
+                collecting = True
+                buf = [a.copy()]
+                silent = 0.0
+                log("★ 按键说话：开始收集（松开结束）")
+            need_ep = (mode == "dialogue" and CFG.get("dialogue", True)) or (not engines) or (mode == "ptt")
             if not need_ep:
                 # KWS 在岗、且没在对话 -> 这一块已经被 KWS 吃掉，不做别的
                 skipped += 1
@@ -1154,22 +1370,62 @@ def cmd_run(seconds=0):
                     # ★ 把麦克风电平一并打出来：
                     #   这样才能分清“麦克风没声音”还是“KWS 没识别”。
                     tip = ""
-                    if mic_peak < 0.01:
-                        tip = "  ⚠ 麦克风几乎没收到声音（检查耳麦是否戴好/默音/没连上）"
+                    if mic_peak < 0.03:
+                        tip = "  ⚠ 麦克风几乎没收到声音（检查耳麦是否戴好/默音/没连上/或换个输入设备）"
+                    # ★ 2026-10-12【削波自愈】连续满格(峰值≈1.0) = 输入被占满，
+                    #   KWS 喂进去的全是饱和噪声 -> 自动降默认麦克风音量并播报一次。
+                    if mic_peak >= 0.97:
+                        _sat_cnt += 1
+                    else:
+                        _sat_cnt = max(0, _sat_cnt - 1)
+                    if _sat_cnt >= 4 and (now - _sat_last_fix) > 600:
+                        _sat_last_fix = now
+                        _sat_cnt = 0
+                        try:
+                            _r_af = _autofix_mic()
+                            if _r_af[0] == "lowered":
+                                log("⚠ 麦克风持续削波(峰值≈1.0) -> 已自动降音量 %.2f→%.2f"
+                                    % (_r_af[1], _r_af[2]))
+                                try:
+                                    import threading as _th2
+                                    _th2.Thread(
+                                        target=lambda: speak_text(
+                                            "麦克风信号一直满格，可能受到干扰，我已自动调低麦克风音量，"
+                                            "现在应该能正常唤醒我了"),
+                                        daemon=True).start()
+                                except Exception:
+                                    pass
+                            elif _r_af[0] == "still":
+                                log("⚠ 麦克风仍削波(音量已低 %.2f) -> 请检查耳机/接口电流干扰"
+                                    % _r_af[1])
+                                try:
+                                    import threading as _th3
+                                    _th3.Thread(
+                                        target=lambda: speak_text(
+                                            "麦克风信号还是满格，音量已经很低了，可能是耳机或者接口有电流干扰，"
+                                            "请检查一下麦克风"),
+                                        daemon=True).start()
+                                except Exception:
+                                    pass
+                            else:
+                                log("削波自愈失败: %s" % _r_af[1])
+                        except Exception as _e_m:
+                            log("削波自愈异常: %s" % _e_m)
                     log("静默/待唤醒已 %d 块（KWS 在岗，不做转写）· 麦克风峰值=%.4f%s"
                         % (skipped, mic_peak, tip))
                     mic_peak = 0.0
                 continue
 
-            rms = float(np.sqrt(np.mean(a * a)) + 1e-12)
-            enough = logic.声音够大(int(rms * 100000), int(CFG["rms_gate"] * 100000))
+            rms = rms_blk   # ★ 2026-10-12：块头已算好（含自适应底噪跟踪）
+            _gate = max(CFG["rms_gate"], _floor_rms * _ADAPT_RATIO)
+            enough = logic.声音够大(int(rms * 100000), int(_gate * 100000))
 
             if not collecting:
                 if not enough:
                     skipped += 1
                     if skipped % 60 == 0:
-                        log("静音跳过 %d 块（本块 RMS=%.5f，门限 %.5f）"
-                            % (skipped, rms, CFG["rms_gate"]))
+                        log("静音跳过 %d 块（本块 RMS=%.5f，有效门限 %.5f=底噪%.5f×%.1f）"
+                            % (skipped, rms, _gate, _floor_rms, _ADAPT_RATIO))
                     if (mode == "dialogue" and CFG.get("dialogue", True)
                             and time.time() - last_voice > CFG["dialogue_idle"]):
                         mode = "wake"
@@ -1185,14 +1441,24 @@ def cmd_run(seconds=0):
             buf.append(a.copy())
             silent = 0.0 if enough else (silent + block_s)
             dur = len(buf) * block_s
-            if silent < CFG["tail_silence"] and dur < CFG["max_utt"]:
+            if mode == "ptt":
+                # 按键说话：松开才结束（不按静音判定），最长 max_utt 兜底
+                if ptt_down and dur < CFG["max_utt"]:
+                    continue
+            elif silent < CFG["tail_silence"] and dur < CFG["max_utt"]:
                 continue
 
             # ---- 这一段结束 ----
             collecting = False
+            _PTT["was"] = (mode == "ptt")
+            if mode == "ptt":
+                mode = "wake"   # 按键式一次性：说完回到只等唤醒
+                log("按键说话结束 -> 识别中（%.1fs）" % dur)
             audio = np.concatenate(buf).astype("float32")
             buf = []
-            audio = trim_silence(audio, rate, CFG["rms_gate"], CFG["lead_pad"])
+            # ★ 2026-10-12：裁剪门限也随底噪走（恒定底噪不把整段当"有声"）
+            _tg = max(CFG["rms_gate"], _floor_rms * 1.2)
+            audio = trim_silence(audio, rate, _tg, CFG["lead_pad"])
             dur = len(audio) / rate
             if dur < CFG["min_utt"]:
                 log("段太短（%.2fs < %.2fs）丢弃" % (dur, CFG["min_utt"]))
@@ -1208,8 +1474,22 @@ def cmd_run(seconds=0):
             if not txt:
                 log("⚠ 转写返回空（音频 %.2fs）-> 换下一段" % dur)
                 continue
+            # ★ 2026-10-12【垃圾转写过滤】SenseVoice 对噪声/低音量常返回句号等标点：
+            #   不是人话，不唤醒也不进路由，直接跳过。
+            if all(_ch in "。，、！？.…" for _ch in txt):
+                log("⚠ 转写仅为标点（%r）-> 忽略" % txt[:30])
+                continue
+            # ★ 2026-10-12【噪声幻觉过滤】纯噪声常被幻觉成"the / 对在这里"这类
+            #   短串；非中文且 <6 字且不在常用英文指令白名单里 -> 当噪声忽略。
+            _EN_OK = {"stop", "exit", "next", "ok", "yes", "no", "on", "off",
+                      "up", "down", "home", "back", "play", "pause", "close",
+                      "open", "hello", "hi", "fairy", "help", "music"}
+            if (not any("\u4e00" <= ch <= "\u9fff" for ch in txt)
+                    and len(txt) < 6 and txt.strip().lower() not in _EN_OK):
+                log("⚠ 转写疑似噪声幻觉（%r）-> 忽略" % txt[:30])
+                continue
 
-            if not engines and mode == "wake":
+            if not engines and mode == "wake" and not _PTT.get("was"):
                 # ---------- 老路子（KWS 不可用）：用文本判唤醒 ----------
                 has, ed = match_wake(txt)
                 gap = 99.0 if last_wake is None else (time.time() - last_wake)
@@ -1314,9 +1594,11 @@ def cmd_run(seconds=0):
                     log("大脑没给出回答，跳过")
                     continue
                 # ★ 2026-10-11【上下文接续】入历史（上限 _HIST_MAX），落盘供下次接续
+                # 注：必须原地裁剪（del），不能用 _HIST = _HIST[...] 赋值——
+                #     那会把模块级 _HIST 遮蔽成 main 局部变量，导致上方 append 报 UnboundLocalError。
                 _HIST.append((txt, reply))
                 if len(_HIST) > _HIST_MAX:
-                    _HIST = _HIST[-_HIST_MAX:]
+                    del _HIST[:len(_HIST) - _HIST_MAX]
                 try:
                     _d = fairy_memory.load()
                     _d["last_dialogue"] = _HIST[-6:]
