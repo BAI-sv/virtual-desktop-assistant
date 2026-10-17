@@ -37,6 +37,7 @@ fairy_ball.py —— 桌面版 Fairy 悬浮球（真正浮在所有窗口之上�
 """
 import ctypes
 import ctypes.wintypes as _wt
+import io
 import json
 import os
 import queue
@@ -1007,6 +1008,54 @@ def retail_bubble(w, ball_cx, px):
                           fill=_PANEL_BG, outline="#0b1622", tags="fairy_tail")
     except Exception as _e:
         print("[fairy] 重画尖角失败: %s: %s" % (type(_e).__name__, _e), flush=True)
+
+
+def fix_mojibake(s):
+    """★ 2026-10-12【乱码自愈】把被错误解码的 UTF-8/GBK 文本还原。
+
+    外部队件（模型输出/子进程/RSS/听歌识曲等）偶尔会把 UTF-8 字节流
+    按 latin-1 / cp1252 / GBK 错误解码，导致气泡/浮窗显示乱码。
+    做多轮还原：①latin-1/cp1252→utf-8/gbk ②utf-8被gbk解（锟斤拷）
+    ③gbk被utf-8解（鐢樺）；还原结果若含中文则采用，否则保持原文。
+    """
+    try:
+        if not s or not isinstance(s, str):
+            return s
+        if not any(ord(c) > 127 for c in s):
+            return s
+        _CJK = lambda t: sum(1 for c in t if "\u4e00" <= c <= "\u9fff") >= 2
+        # 方案A：UTF-8 字节被 latin-1 / cp1252 解码（显示 ï¼ç»åå 这类）
+        for enc in ("latin-1", "cp1252"):
+            try:
+                b = s.encode(enc)
+            except Exception:
+                continue
+            for dec in ("utf-8", "gbk"):
+                try:
+                    t = b.decode(dec)
+                except Exception:
+                    continue
+                if _CJK(t):
+                    return t
+        # 方案B：UTF-8 字节被 GBK 解码（显示 锟斤拷 这类）
+        try:
+            b = s.encode("gbk")
+            t = b.decode("utf-8")
+            if _CJK(t):
+                return t
+        except Exception:
+            pass
+        # 方案C：GBK 字节被 UTF-8 解码（显示 鐢樺 这类）
+        try:
+            b = s.encode("utf-8")
+            t = b.decode("gbk")
+            if _CJK(t):
+                return t
+        except Exception:
+            pass
+        return s
+    except Exception:
+        return s
 
 
 def make_bubble(parent, text, tail="left", max_w=250, tail_x=None):
@@ -2217,9 +2266,25 @@ class FairyBall(tk.Tk):
         """★ 2026-10-12 修复：FairyBall 继承 tk.Tk 没有 say，转发给 speaker。
         否则"保存失败: '_tkinter.tkapp' object has no attribute 'say'"。"""
         try:
+            if text and level in ("doing", "answer", "alert", "advice"):
+                try:
+                    self._flash_bar((text or "")[:28])
+                except Exception:
+                    pass
             return self.speaker.say(text, level=level)
         except Exception:
             return None
+
+    def _flash_bar(self, text):
+        """★ 2026-10-12【播报提示条】主线程短暂显示提示条 3 秒，
+        播报时也能看到进度条面板（不只在任务运行时显示）。"""
+        try:
+            def _on():
+                self._local_task = text
+                self.after(3000, lambda: setattr(self, "_local_task", None))
+            self.after(0, _on)
+        except Exception:
+            pass
 
     def _on_state(self, kind, text):
         """状态回调。
@@ -2263,6 +2328,11 @@ class FairyBall(tk.Tk):
                 # level="answer"：_duck_around 只对 answer/alert 让位，
                 # 因为这是"主动提问、在等答案"的场景，音乐应该让位。
                 # 过程播报(doing) 绝不用这个 level，否则干活时音量被反复压低。
+                # ★ 2026-10-12：播报时也短暂显示提示条（否则日常对话看不到提示条）
+                try:
+                    self._flash_bar((text or "")[:28])
+                except Exception:
+                    pass
                 self.speaker.say(text, level="answer")
             elif kind == "token":
                 self.speaker.say(text)
@@ -2331,7 +2401,7 @@ class FairyBall(tk.Tk):
         if py < vy + 4:                     # 上方也放不下 -> 贴顶
             py = vy + 4
             flip = False
-        px = max(vx + 4, min(px, vx + vw - ww - 4))
+        px = max(vx + 16, min(px, vx + vw - ww - 16))   # ★ 2026-10-12：左右收拢 4->16，提示不再贴边
         return px, py, flip
 
     def _tail_x(self):
@@ -2344,6 +2414,105 @@ class FairyBall(tk.Tk):
         off = 0 if self.side == "right" else BAR_W + GAP
         return self.winfo_x() + off + SIZE // 2
 
+    def _ball_progress(self, pct, label, on=True):
+        """★ 2026-10-12【球体进度条】临时进度画在球右侧进度条面板（不弹气泡）。
+        on=True 设置 (pct, label)；on=False 清空，回到宿主实时进度。"""
+        try:
+            if on:
+                self._temp_prog = (int(pct), str(label))
+            else:
+                self._temp_prog = None
+        except Exception:
+            pass
+
+    def _preset_progress(self, title, port):
+        """★ 2026-10-12【组合切换进度 v2】进度画在球右侧进度条面板，
+        就绪后播报「组合 XX 已就绪」。port 为字符串端口。"""
+        try:
+            self._ball_progress(5, "Fairy 组合切换 · %s" % title, True)
+
+            def _poll():
+                import urllib.request as _ur
+                _t0 = time.time()
+                _last = -1
+                while time.time() - _t0 < 90:
+                    _up = False
+                    try:
+                        with _ur.urlopen("http://127.0.0.1:%s/v1/models"
+                                         % port, timeout=1.2) as _r:
+                            _j = json.loads(_r.read().decode("utf-8", "ignore"))
+                            _up = bool(_j.get("data") or _j.get("models"))
+                    except Exception:
+                        try:
+                            with _ur.urlopen("http://127.0.0.1:%s/api/tags"
+                                             % port, timeout=1.2) as _r2:
+                                _j2 = json.loads(_r2.read().decode("utf-8", "ignore"))
+                                _up = bool(_j2.get("models"))
+                        except Exception:
+                            _up = False
+                    _p = 40 if not _up else 95
+                    if _p != _last:
+                        _last = _p
+                        self._ball_progress(_p, "Fairy 组合切换 · %s" % title, True)
+                    if _up:
+                        self._ball_progress(100, "Fairy 组合切换 · %s" % title, True)
+                        time.sleep(0.8)
+                        self._ball_progress(0, "", False)
+                        try:
+                            self._bubble("组合「%s」已就绪" % title, 4)
+                            self.say("组合%s已就绪" % title, "ok")
+                        except Exception:
+                            pass
+                        return
+                    time.sleep(0.6)
+                self._ball_progress(0, "", False)
+                try:
+                    self._bubble("组合「%s」启动超时，请检查引擎" % title, 5)
+                    self.say("组合%s启动超时" % title, "warn")
+                except Exception:
+                    pass
+            threading.Thread(target=_poll, daemon=True).start()
+        except Exception:
+            pass
+
+    def _stack_relayout(self):
+        """★ 2026-10-12【气泡栈】多个气泡/浮窗垂直排列，绝不叠加：
+        从球正下方逐一向下排（间隔 8px）；放不下翻到球上方从下往上排；
+        任一气泡超时消失后自动补位重排。"""
+        try:
+            _stack = []
+            for _w in getattr(self, "_bub_stack", []):
+                try:
+                    if _w.winfo_exists():
+                        _stack.append(_w)
+                    else:
+                        try:
+                            _w.destroy()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            self._bub_stack = _stack
+            if not _stack:
+                return
+            vx, vy, vw, vh = virtual_screen()
+            _heights = [max(1, _w.winfo_height()) for _w in _stack]
+            _total = sum(h + 8 for h in _heights)
+            _base_y = self.winfo_y() + WIN_H + 6
+            _flip_up = False
+            if _base_y + _total > vy + vh - 8:
+                _flip_up = True
+                _base_y = self.winfo_y() - 6
+            _y = _base_y - _total if _flip_up else _base_y
+            for _w, _h in zip(_stack, _heights):
+                _ww2 = max(1, _w.winfo_width())
+                _px = self._ball_center_x() - _ww2 // 2
+                _px = max(vx + 4, min(_px, vx + vw - _ww2 - 4))
+                _w.geometry("+%d+%d" % (_px, _y))
+                _y += _h + 8
+        except Exception:
+            pass
+
     def _bubble(self, text, seconds=4):
         """对话气泡：只在 Fairy【主动说关键话】时弹一句，几秒后自动消失。
 
@@ -2353,24 +2522,37 @@ class FairyBall(tk.Tk):
         为什么还是要：
           · Fairy 主动说话（开工/完工/告警）时你多半没看屏幕，纯语音会漏
           · 补一句短气泡和语音同步，就不会漏事
+        ★ 2026-10-12：多个气泡垂直排列（气泡栈），不叠加；各自超时消失并补位。
         """
         try:
-            old = getattr(self, "_bub", None)
-            if old is not None:
-                try:
-                    old.destroy()
-                except Exception:
-                    pass
-            vx, vy, vw, vh = virtual_screen()
-            bx = self._ball_screen_x()
-            by = self.winfo_y()
-            # ★统一到"面板正下方"（尖角朝上指着球）
+            if not hasattr(self, "_bub_stack"):
+                self._bub_stack = []
+            text = fix_mojibake(text)   # ★ 2026-10-12：乱码自愈，显示前还原
             w, ww, wh = make_bubble(self, text, tail="top", tail_x=self._tail_x())
             px, py, _flip = self._popup_pos(ww, wh)
             retail_bubble(w, self._ball_center_x(), px)   # ★按落点重画尖角，对准球
             w.geometry("+%d+%d" % (px, py))
-            w.after(int(seconds * 1000), w.destroy)
-            self._bub = w
+            self._bub_stack.append(w)
+
+            def _gone():
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+                try:
+                    if w in self._bub_stack:
+                        self._bub_stack.remove(w)
+                except Exception:
+                    pass
+                try:
+                    self._stack_relayout()
+                except Exception:
+                    pass
+            w.after(int(seconds * 1000), _gone)
+            try:
+                self._stack_relayout()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2385,6 +2567,7 @@ class FairyBall(tk.Tk):
             w.overrideredirect(True)
             w.attributes("-topmost", True)
             w.configure(bg="#0a1420")
+            lines = [fix_mojibake(_l) for _l in lines]   # ★ 2026-10-12：乱码自愈
             tk.Label(w, text="\n".join(lines), justify="left", fg="#cfe3f5", bg="#0a1420",
                      font=("SimHei", 12), padx=16, pady=12).pack()
             w.update_idletasks()
@@ -2394,7 +2577,30 @@ class FairyBall(tk.Tk):
             # 贴屏幕下沿时自动翻到面板上方；左右做边界收拢。
             px, py, _flip = self._popup_pos(ww, wh)   # ★与气泡/悬停面板同一套定位
             w.geometry("+%d+%d" % (px, py))
-            w.after(seconds * 1000, w.destroy)
+            # ★ 2026-10-12：播报浮窗也进气泡栈，与短气泡垂直排列不叠加
+            if not hasattr(self, "_bub_stack"):
+                self._bub_stack = []
+            self._bub_stack.append(w)
+
+            def _gone():
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+                try:
+                    if w in self._bub_stack:
+                        self._bub_stack.remove(w)
+                except Exception:
+                    pass
+                try:
+                    self._stack_relayout()
+                except Exception:
+                    pass
+            w.after(seconds * 1000, _gone)
+            try:
+                self._stack_relayout()
+            except Exception:
+                pass
         except Exception as _e:
             # 顺手去掉静默兜底（今天已多次因它藏住 bug）
             print("[fairy] 播报浮窗失败: %s: %s" % (type(_e).__name__, _e), flush=True)
@@ -2520,78 +2726,9 @@ class FairyBall(tk.Tk):
             pass
 
     def _on_hover_in(self, e=None):
-        """鼠标停在球上：弹一个小面板显示【最近一句 + 状态 + 位置】。移开即消失。
-
-        为什么用悬停而不是常驻气泡：常驻会挡桌面、还把球变成聊天窗口；
-        悬停是"想看的时候看一眼"，不打扰。注意桌面球窗口带 WS_EX_LAYERED，
-        alpha=0 的区域不接收鼠标，所以 Enter 只会落在球体本身上，不会误触发。
-        """
-        print('[fairy] 鼠标进入球（悬停触发）', flush=True)
-        if getattr(self, "_hover", None) is not None:
-            return
-        try:
-            rows = []
-            try:
-                with self.state.lock:
-                    doing = self.state.doing or ""
-                    steps = self.state.steps or 0
-                    ok = self.state.ok
-                    prog = self.state.progress
-            except Exception:
-                doing, steps, ok, prog = "", 0, False, None
-            # ★ 弹窗内容位置优化：
-            #   ① 首行做成【状态头】（● / ○ + 在线 / 未连接），一眼看连接状态
-            #   ② 进度 + 步数合并成一行（原来是两行，行数 8 -> 7）
-            #   ③ 标签统一成【3 个全角字 + 全角冒号】：在做／进度／刚说／位置／方式
-            #      —— 全角字等宽，右边的值自然对齐，不用手工数空格
-            rows.append("● DSH 在线" if ok else "○ DSH 未连接")
-            if doing:
-                rows.append("在做：" + doing)
-            if steps or isinstance(prog, (int, float)):
-                _pt = ("%d%%" % int(prog)) if isinstance(prog, (int, float)) else "--"
-                _st = ("第 %d 步" % steps) if steps else "--"
-                rows.append("进度：%s（%s）" % (_pt, _st))
-            try:
-                last = getattr(self.speaker, "last", "") or ""
-            except Exception:
-                last = ""
-            if last:
-                rows.append("刚说：" + last)
-            if self.city:
-                rows.append("位置：" + self.city)
-            if self.state.mode:
-                rows.append("方式：" + self.state.mode)
-            try:
-                _sc = getattr(self, "_strata_cache", None)
-                if _sc and _sc.get("state") == "running":
-                    rows.append("本地运算：运行中")
-                elif _sc and _sc.get("state") == "unloaded":
-                    rows.append("本地运算：已停止")
-            except Exception:
-                pass
-            txt = "\n".join(rows)
-        except Exception:
-            txt = "状态读取失败"
-        try:
-            vx, vy, vw, vh = virtual_screen()
-            bx, by = self._ball_screen_x(), self.winfo_y()
-            # 圆角气泡 + 尖角指向球（尖角永远朝着球那边）
-            # ★统一到"面板正下方"（与气泡/播报同一处）
-            w, ww, wh = make_bubble(self, txt, tail="top", max_w=250,
-                                    tail_x=self._tail_x())
-            px, py, _flip = self._popup_pos(ww, wh)
-            retail_bubble(w, self._ball_center_x(), px)   # ★按落点重画尖角，对准球
-            w.geometry("+%d+%d" % (px, py))
-            w.update_idletasks()
-            print("[fairy] 气泡 side=%s bx=%d by=%d px=%d py=%d ww=%d wh=%d 实际=%dx%d+%d+%d"
-                  % (self.side, bx, by, px, py, ww, wh,
-                     w.winfo_width(), w.winfo_height(), w.winfo_x(), w.winfo_y()), flush=True)
-            self._hover = w
-        except Exception as _e:
-            import traceback
-            print('[fairy] 悬停面板失败: %s' % _e, flush=True)
-            traceback.print_exc()
-            self._hover = None
+        """★ 2026-10-12【悬停提示卡已删除】按用户要求不再弹出左侧状态卡。
+        保留方法签名以兼容 <Enter> 绑定；需要看状态请左键球或打开控制面板。"""
+        return
 
     def _on_hover_out(self, e=None):
         print('[fairy] 鼠标离开球', flush=True)
@@ -2681,6 +2818,16 @@ class FairyBall(tk.Tk):
     def _strata_stop_work(self):
         """★ 后台线程：POST /v1/unload，并实测回收了多少内存。"""
         try:
+            # ★ 2026-10-14【静默优化】Strata(8080) 没跑时直接判"本来就没在跑"，
+            #   避免 POST /v1/unload 抛 10061 -> 「停止失败」噪音（health_check 会误报）。
+            import socket as _sock
+            _s = _sock.socket()
+            _s.settimeout(0.5)
+            _up = (_s.connect_ex(("127.0.0.1", 8080)) == 0)
+            _s.close()
+            if not _up:
+                self._strata_feedback("本地运算本来就没在跑", speak="本地运算本来就没在跑")
+                return
             try:
                 _before = _free_ram_gb()
             except Exception:
@@ -2721,7 +2868,7 @@ class FairyBall(tk.Tk):
             self._strata_feedback("本地运算已经在跑了")
             return
         if st.get("state") == "unloaded":
-            self._strata_feedback("正在启动本地运算（加载模型，约 1~2 分钟）…")
+            self._strata_feedback("启动本地运算（加载模型，约 1~2 分钟）…")
         else:
             self._strata_feedback("正在拉起本地运算服务…")
         threading.Thread(target=self._strata_start_work, args=(st.get("state"),), daemon=True).start()
@@ -2770,6 +2917,47 @@ class FairyBall(tk.Tk):
         finally:
             self._strata_busy = False
             self._strata_cache = None
+
+    def _dialog(self, title, w=440, h=320, bg="#f2f3f5"):
+        """★ 2026-10-12【统一子窗口】所有弹窗同主界面风格：浅灰底 + 圆角 + 黑体。
+        返回 (win, wrap)，wrap 是内容容器（淡色底，往里面摆控件）。"""
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.attributes("-topmost", True)
+        win.configure(bg=bg)
+        win.resizable(False, False)
+        win.geometry("%dx%d+%d+%d" % (w, h,
+                                      max(0, (win.winfo_screenwidth() - w) // 2),
+                                      max(0, (win.winfo_screenheight() - h) // 2)))
+        try:
+            import ctypes
+            _u = ctypes.windll.user32
+            _g = ctypes.windll.gdi32
+            _rgn = _g.CreateRoundRectRgn(0, 0, w + 1, h + 1, 18, 18)
+            if _rgn:
+                _u.SetWindowRgn(win.winfo_id(), _rgn, True)
+        except Exception:
+            pass
+        tk.Label(win, text=title, bg=bg, fg="#52749b",
+                 font=("SimHei", 15, "bold")).pack(anchor="w", padx=24, pady=(14, 2))
+        _wrap = tk.Frame(win, bg=bg)
+        _wrap.pack(fill="both", expand=True, padx=24, pady=(4, 18))
+        return win, _wrap
+
+    def _dlg_btn(self, parent, text, cmd, danger=False, w=100):
+        """统一弹窗按钮：圆角白底，悬停变色。"""
+        _fg = "#a8625e" if danger else "#46536a"
+        _img = _pil_round(text, w, 40, 12, "#ffffff", _fg, True, "#dfe3ea")[0]
+        _img_h = _pil_round(text, w, 40, 12, "#e4edf6", _fg, True, "#cdd9e6")[0]
+        _b = tk.Button(parent, image=_img, bd=0, relief="flat",
+                       highlightthickness=0, bg="#f2f3f5",
+                       activebackground="#f2f3f5", cursor="hand2",
+                       command=cmd)
+        _b.image = _img
+        _b.bind("<Enter>", lambda _ev, b=_b, n=_img, h=_img_h: b.configure(image=h))
+        _b.bind("<Leave>", lambda _ev, b=_b, n=_img, h=_img_h: b.configure(image=n))
+        _b.pack(side="left", padx=5, pady=4)
+        return _b
 
     def _ai_cfg(self):
         """读取 fairy.json 的 ai 段（后端 / api_key / 模型 / 接口地址）。"""
@@ -2859,90 +3047,113 @@ class FairyBall(tk.Tk):
             self._bubble("API Key 已保存（%d 位）" % len(val), 3)
         self._save_ai_cfg({"api_key": val})
 
-    def _engine_setup_panel(self):
-        """★ 2026-10-11【本地引擎设置】引擎 / 模型 / 端口（默认保留）。"""
-        _cfg = self._ai_cfg()
-        _be = _cfg.get("backend") or "strata"
-        _md = _cfg.get("model") or ""
-        _pt = str(_cfg.get("port") or "")
-        _def_port = {"strata": "8080", "ollama": "11434", "llm": "8085"}
-        _eng_var = tk.StringVar(value=_be)
-        _port_var = tk.StringVar(value=_pt or _def_port.get(_be, "8080"))
-        win = tk.Toplevel(self)
-        win.title("本地引擎设置")
-        win.attributes("-topmost", True)
-        win.configure(bg="#ffffff")
-        win.resizable(False, False)
-        _W, _H = 430, 400
-        win.geometry("%dx%d+%d+%d" % (_W, _H,
-                                      max(0, (win.winfo_screenwidth() - _W) // 2),
-                                      max(0, (win.winfo_screenheight() - _H) // 2)))
-        _wrap = tk.Frame(win, bg="#ffffff")
-        _wrap.pack(fill="both", expand=True, padx=26, pady=18)
-
-        def _lab(t):
-            tk.Label(_wrap, text=t, bg="#ffffff", fg="#6e7888",
-                     font=("SimHei", 13, "bold")).pack(anchor="w", pady=(8, 4))
-
-        def _on_eng():
-            _port_var.set(_def_port.get(_eng_var.get(), "8080"))
-
-        _lab("引擎类型")
-        for _nm, _code in (("Strata（本地运算）", "strata"),
-                           ("Ollama", "ollama"),
-                           ("视觉 llama.cpp", "llm")):
-            tk.Radiobutton(_wrap, text=_nm, value=_code, variable=_eng_var,
-                           command=_on_eng, bg="#ffffff", fg="#46536a",
-                           activebackground="#ffffff", selectcolor="#ffffff",
-                           font=("SimHei", 12)).pack(anchor="w", pady=2)
-        _lab("模型（下拉选择本机探测到的模型）")
+    def _doubao_cfg(self):
+        """读 fairy.json online.doubao 段。"""
         try:
-            _title, _models = self._ai_probe_models()
-            if not _models:
-                _models = [("（保持当前 %s）" % _md) if _md else "（未探测到模型）"]
-                if _md and ("（保持当前 %s）" % _md) not in _models:
-                    _models = [_md] + _models
+            p = getattr(fairy_root, "CONFIG", None)
+            c = {}
+            if p and os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    c = json.load(f)
+            return dict(((c.get("online") or {}).get("doubao") or {}))
         except Exception:
-            _models = [("（保持当前 %s）" % _md) if _md else "（未探测到模型）"]
-        _mv = tk.StringVar(value=_md if _md in _models else _models[0])
-        tk.OptionMenu(_wrap, _mv, *_models).configure(bg="#ffffff",
-                                                      activebackground="#e4edf6",
-                                                      font=("SimHei", 12),
-                                                      highlightthickness=0)
-        _lab("端口（保留默认即可，可自行修改）")
-        tk.Entry(_wrap, textvariable=_port_var, width=12,
-                 font=("SimHei", 12)).pack(anchor="w", pady=4)
+            return {}
 
-        def _save():
-            _b = _eng_var.get()
-            _m = _mv.get() if _mv.get() and not _mv.get().startswith("（") else _md
-            _p = _port_var.get().strip() or _def_port.get(_b, "8080")
-            self._save_ai_cfg({"backend": _b, "model": _m, "port": _p})
-            self._bubble("本地引擎已保存：%s / %s / 端口 %s" % (_b, _m or "默认", _p), 4)
+    def _save_doubao_cfg(self, patch):
+        """合入 fairy.json online.doubao 段（保留其它配置键）。"""
+        try:
+            path = fairy_root.CONFIG
+            c = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        c = json.load(f)
+                except Exception:
+                    c = {}
+            onl = dict(c.get("online") or {})
+            dou = dict(onl.get("doubao") or {})
+            dou.update(patch)
+            onl["doubao"] = dou
+            c["online"] = onl
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(c, f, ensure_ascii=False, indent=2)
             try:
-                self.say("本地引擎设置已保存", "ok")
+                fairy_root.CFG["online"] = onl
             except Exception:
                 pass
-            win.destroy()
+            return True
+        except Exception as e:
+            self._bubble("保存豆包配置失败：" + str(e)[:60], 4)
+            return False
 
-        tk.Button(_wrap, text="保存设置", command=_save, bg="#e4edf6",
-                  fg="#46536a", activebackground="#cdd9e6",
-                  font=("SimHei", 14, "bold"), bd=0,
-                  highlightthickness=0, cursor="hand2",
-                  ).pack(pady=(20, 4), ipadx=20, ipady=6)
-        win.bind("<Return>", lambda _ev: _save())
-        win.focus_force()
+    def _set_doubao_key(self):
+        """★ 2026-10-12【豆包（火山方舟）】填 API Key 启用在线豆包大脑。
+        本地引擎不可用时，ear 自动降级到豆包回答（无需 DSH）。"""
+        import tkinter.simpledialog as _sd
+        _cur = (self._doubao_cfg().get("api_key") or "").strip()
+        _masked = ("（已配置 %d 位）" % len(_cur)) if _cur else "（未配置）"
+        _key = _sd.askstring("豆包 - 火山方舟 API Key",
+                             "粘贴你的豆包 API Key（当前%s）：\n"
+                             "获取：火山方舟控制台 → API Key 管理" % _masked,
+                             parent=self)
+        if _key is None:
+            return
+        _key = _key.strip()
+        self._save_doubao_cfg({"enabled": bool(_key), "api_key": _key})
+        self._bubble(("豆包已启用（%d 位 Key）" % len(_key)) if _key else "豆包已停用", 3)
+
+    def _set_doubao_model(self):
+        """弹窗设置豆包模型名（默认 doubao-seed-1-6-250615）。"""
+        import tkinter.simpledialog as _sd
+        _cur = self._doubao_cfg().get("model") or "doubao-seed-1-6-250615"
+        _val = _sd.askstring("豆包 - 模型", "模型名（当前：%s）：\n"
+                             "例：doubao-seed-1-6-250615 / doubao-pro-32k" % _cur,
+                             parent=self, initialvalue=_cur)
+        if _val is None:
+            return
+        _val = _val.strip()
+        if _val:
+            self._save_doubao_cfg({"model": _val})
+            self._bubble("豆包模型已设为：" + _val, 3)
+
 
     def _ai_set_model(self):
-        import tkinter.simpledialog as _sd
-        cur = self._ai_cfg().get("model") or ""
-        val = _sd.askstring("AI 大模型 - 模型", "模型名称（当前：%s）" % (cur or "未设置"),
-                            parent=self, initialvalue=cur)
-        if val is None:
-            return
-        val = val.strip()
-        self._save_ai_cfg({"model": val})
-        self._bubble("模型已设为：" + (val or "（空）"), 3)
+        """★ 2026-10-12【本地模型选择】统一风格弹窗 + 下拉选择（探测到的模型）。"""
+        win, wrap = self._dialog("本地模型选择", 440, 300)
+        tk.Label(wrap, text="从下拉选择本机探测到的模型：", bg="#f2f3f5",
+                 fg="#6e7888", font=("SimHei", 13)).pack(anchor="w", pady=(6, 4))
+        import tkinter.ttk as _ttk
+        _cur = self._ai_cfg().get("model") or ""
+        _opts = [_cur] if _cur else []
+        _src = {}
+        try:
+            for _s, _n in self._ai_probe_models():
+                if _n not in _src:
+                    _src[_n] = _s
+                    _opts.append(_n)
+        except Exception:
+            pass
+        _var = tk.StringVar(value=_cur or (_opts[0] if _opts else ""))
+        _cb = _ttk.Combobox(wrap, textvariable=_var, values=_opts or ["（未探测到模型）"],
+                            font=("SimHei", 13), state="readonly", width=28)
+        _cb.pack(anchor="w", pady=(2, 8))
+        tk.Label(wrap, text="也可以手动输入模型名（不选下拉就自己填）：", bg="#f2f3f5",
+                 fg="#6e7888", font=("SimHei", 13)).pack(anchor="w")
+        _man = tk.Entry(wrap, font=("SimHei", 13), width=30)
+        _man.pack(anchor="w", pady=(2, 10))
+
+        def _ok():
+            _v = (_var.get() or "").strip()
+            _m = (_man.get() or "").strip()
+            _fin = _m or _v or ""
+            self._save_ai_cfg({"model": _fin})
+            self._bubble("本地模型已设为：" + (_fin or "（空，用引擎默认）"), 3)
+            win.destroy()
+        _row = tk.Frame(wrap, bg="#f2f3f5")
+        _row.pack(anchor="w", pady=(6, 0))
+        self._dlg_btn(_row, "保存", _ok)
+        self._dlg_btn(_row, "取消", win.destroy)
+        win.focus_force()
 
     def _ai_set_url(self):
         """弹窗设置自定义接口地址（OpenAI 兼容 base_url）。"""
@@ -2955,6 +3166,7 @@ class FairyBall(tk.Tk):
         val = val.strip()
         self._save_ai_cfg({"base_url": val})
         self._bubble("接口地址已保存：" + (val or "（空）"), 3)
+
 
     def _ai_probe_now(self):
         def _work():
@@ -2994,73 +3206,69 @@ class FairyBall(tk.Tk):
             c["endpoints"] = e
             with open(p, "w", encoding="utf-8") as f:
                 json.dump(c, f, ensure_ascii=False, indent=2)
-            _nm = {"auto": "自动（本地优先）", "dsh": "DSH 内核",
+            _nm = {"auto": "自动（本地优先）", "dsh": "DSH 云端",
                    "local": "本地内核（单机模式）"}.get(k, k)
             self._bubble("大脑模式已切换：" + _nm, 3)
+            # ★ 2026-10-12【DSH 可启动】切到 dsh 模式时，若 DSH 没在跑，自动拉起
+            if k == "dsh":
+                self._ensure_dsh()
         except Exception as e:
             self._bubble("切换大脑模式失败：" + str(e)[:60], 4)
 
-    def _api_status_panel(self):
-        """打开 API 状态面板：大脑模式 / DSH / Strata / Ollama / LLM / Key / 余额。
-        ★ 2026-10-11【DSH 解耦】DSH 只在【大脑模式=DSH 内核】时才探测；
-           local（默认）/auto 时显示"未启用"，不主动连 DSH。"""
-        def _work():
-            _nm = {"local": "本地内核（单机模式）", "dsh": "DSH 内核",
-                   "auto": "自动（本地优先）"}
-            pref = self._pref()
-            lines = ["【Fairy API 状态】", "大脑模式：" + _nm.get(pref, pref)]
+    def _ensure_dsh(self):
+        """★ 2026-10-12【DSH 可启动】DeepSeek Harness 没在跑就自动拉起。
+
+        探测 19387（dsh_base）；不通则后台启动 DeepSeek Harness.exe，
+        最多等 90 秒，就绪后气泡+语音播报。绝不弹黑窗。
+        """
+        def _job():
+            import socket as _sk
+            import subprocess as _sp
             try:
-                import fairy_endpoints as _fep
-                if pref == "dsh":
-                    _dsh = _fep.probe(_fep.dsh_base() + "/api/fairy/meta")
-                    lines.append("DSH（%s）：%s" % (_fep.dsh_base(), "在线" if _dsh else "离线"))
-                else:
-                    lines.append("DSH：未启用（选「DSH 内核」才连接）")
-            except Exception:
-                lines.append("DSH：未知")
-            _st = self._strata_probe()
-            _ram = ""
-            if _st.get("ram_used") is not None and _st.get("ram_total"):
-                _ram = "（内存 %.1f/%.1f GB）" % (_st["ram_used"], _st["ram_total"])
-            lines.append("Strata（8080）：%s%s" % (_st.get("text", "状态未知"), _ram))
-            try:
-                with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as r:
-                    _d = json.loads(r.read().decode("utf-8", "replace"))
-                    _ms = [_m.get("name") for _m in ((_d.get("models") or [])[:3])]
-                    lines.append("Ollama（11434）：在线" + ("：" + "、".join(_ms) if _ms else ""))
-            except Exception:
-                lines.append("Ollama（11434）：离线")
-            _llm_ok = False
-            for _port in (8085, 8080):
                 try:
-                    with urllib.request.urlopen("http://127.0.0.1:%d/v1/models" % _port, timeout=2) as r:
-                        _d = json.loads(r.read().decode("utf-8", "replace"))
-                        _ms = [str(_m.get("id") or _m.get("model") or "")[:40]
-                               for _m in ((_d.get("data") or [])[:2])]
-                        lines.append("LLM·llama.cpp（:%d）：在线" % _port
-                                     + ("：" + "、".join(_ms) if _ms else ""))
-                        _llm_ok = True
-                        break
+                    _s = _sk.create_connection(("127.0.0.1", 19387), timeout=1.5)
+                    _s.close()
+                    self._bubble("DSH 云端已在运行", 3)
+                    return
                 except Exception:
-                    continue
-            if not _llm_ok:
-                lines.append("LLM·llama.cpp（8085）：离线")
-            _ai = self._ai_cfg()
-            _key = _ai.get("api_key") or ""
-            _k = ("已配置（%d 位）" % len(_key)) if _key else "未配置"
-            _mdl = _ai.get("model") or "（未设置）"
-            lines.append("API Key：%s　模型：%s" % (_k, _mdl))
-            try:
-                _bal = read_balance()
-                lines.append("DeepSeek 余额：%s" % (_bal or "（无 key 或查询失败）"))
-            except Exception:
-                pass
-            try:
-                import tkinter.messagebox as _mb
-                _mb.showinfo("Fairy API 状态", "\n".join(lines), parent=self)
-            except Exception:
-                self._bubble("\n".join(lines), 8)
-        threading.Thread(target=_work, daemon=True).start()
+                    pass
+                _exe = (r"C:\Users\Administrator\AppData\Local\Programs"
+                        r"\DeepSeek Harness\DeepSeek Harness.exe")
+                if not os.path.isfile(_exe):
+                    self._bubble("找不到 DeepSeek Harness，请手动启动", 4)
+                    return
+                self._bubble("正在启动 DSH 云端…", 4)
+                try:
+                    self.say("正在启动 DSH 云端", "ok")
+                except Exception:
+                    pass
+                # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：完全脱离，不弹窗
+                _sp.Popen([_exe], cwd=os.path.dirname(_exe), close_fds=True,
+                          creationflags=0x00000008 | 0x00000200)
+                for _i in range(90):
+                    time.sleep(1)
+                    try:
+                        _s = _sk.create_connection(("127.0.0.1", 19387), timeout=1.0)
+                        _s.close()
+                        self._bubble("DSH 云端已就绪", 3)
+                        try:
+                            self.say("DSH 云端已就绪", "ok")
+                        except Exception:
+                            pass
+                        return
+                    except Exception:
+                        pass
+                self._bubble("DSH 云端 90 秒内未就绪，请稍后再试", 5)
+            except Exception as _e:
+                try:
+                    self._bubble("启动 DSH 失败：" + str(_e)[:50], 4)
+                except Exception:
+                    pass
+        try:
+            threading.Thread(target=_job, daemon=True).start()
+        except Exception:
+            pass
+
 
     def _probe_backend(self):
         """引擎自动选择：按 Strata → Ollama → llama.cpp → 自定义 顺序探测，返回第一个活的。"""
@@ -3083,87 +3291,7 @@ class FairyBall(tk.Tk):
             return "custom"
         return "strata"  # 全都没跑时的兜底
 
-    def _local_ask(self, text, timeout=60):
-        """★ 2026-10-12【分层】本地推理失败自动切在线降级链（DSH->豆包）。"""
-        try:
-            return self._local_ask_local(text, timeout=timeout)
-        except Exception:
-            r = ep.ask_get(text, timeout=min(timeout, 60))
-            if r:
-                return r[0]
-            raise
 
-    def _local_ask_local(self, text, timeout=60):
-        """用当前 AI 后端（Strata / Ollama / LLM / 自定义）做一次小模型推理。
-        backend=auto 时按可用性自动切换（Strata→Ollama→llama.cpp→自定义）。"""
-        ai = self._ai_cfg()
-        backend = ai.get("backend") or "strata"
-        if backend == "auto":
-            backend = self._probe_backend()
-        model = (ai.get("model") or "").strip()
-        base_url = (ai.get("base_url") or "").strip().rstrip("/")
-        api_key = (ai.get("api_key") or "").strip()
-        msgs = [{"role": "user", "content": text}]
-
-        def _pick_model(base):
-            if model:
-                return model
-            try:
-                req = urllib.request.Request(base + "/v1/models",
-                                             headers={"content-type": "application/json"})
-                with urllib.request.urlopen(req, timeout=4) as r:
-                    d = json.loads(r.read().decode("utf-8", "replace"))
-                for m in (d.get("data") or []):
-                    return m.get("id") or m.get("model") or ""
-            except Exception:
-                pass
-            return ""
-
-        def _chat(url, payload, headers):
-            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                         headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8", "replace"))
-
-        if backend == "strata":
-            _base = "http://127.0.0.1:8080"
-            _m = _pick_model(_base)
-            d = _chat(_base + "/v1/chat/completions",
-                      {"model": _m, "messages": msgs, "stream": False},
-                      {"content-type": "application/json"})
-            return (d.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        if backend == "ollama":
-            _base = "http://127.0.0.1:11434"
-            _m = model or ""
-            if not _m:
-                with urllib.request.urlopen(_base + "/api/tags", timeout=4) as r:
-                    _dd = json.loads(r.read().decode("utf-8", "replace"))
-                for mm in (_dd.get("models") or []):
-                    _m = mm.get("name") or ""
-                    break
-            d = _chat(_base + "/api/chat",
-                      {"model": _m, "messages": msgs, "stream": False},
-                      {"content-type": "application/json"})
-            return (d.get("message") or {}).get("content") or ""
-        if backend == "llm":
-            _base = base_url or "http://127.0.0.1:8085"
-            _m = _pick_model(_base)
-            d = _chat(_base + "/v1/chat/completions",
-                      {"model": _m, "messages": msgs, "stream": False,
-                       "max_tokens": 1024},
-                      {"content-type": "application/json"})
-            return (d.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        if backend == "custom":
-            if not base_url:
-                return "（自定义接口未配置 base_url）"
-            _h = {"content-type": "application/json"}
-            if api_key:
-                _h["authorization"] = "Bearer " + api_key
-            _m = model or ""
-            d = _chat(base_url + "/chat/completions",
-                      {"model": _m, "messages": msgs, "stream": False}, _h)
-            return (d.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        return "（未知后端：%s）" % backend
 
     def _ai_set_net_model(self):
         """★ 2026-10-11【网络选项卡】设置网络模型名（DSH / 自定义接口用的模型）。"""
@@ -3185,84 +3313,59 @@ class FairyBall(tk.Tk):
 
     @staticmethod
     def _funasr_py():
-        p = os.environ.get("FAIRY_FUNASR_PY",
-                           os.path.join(fairy_root.ROOT, "envs", "funasr", "Scripts", "python.exe"))
+        p = r"D:\FAIRY\envs\funasr\Scripts\python.exe"
         return p if os.path.exists(p) else sys.executable
 
     def _vision_ocr(self):
-        """全屏截图识别文字（RapidOCR，气泡显示 + 语音播报）。"""
+        """★ 2026-10-12【选框OCR】微信风格截图选区域 -> 识别区域文字（不再全屏）。"""
         import subprocess as _sp
 
         def _work():
-            self.say("正在识别屏幕文字", "doing")
+            self.say("拖拽选择要识别的区域", "doing")
             try:
-                r = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_ocr.py"),
-                             "--full", "--json"], capture_output=True, timeout=60,
-                            text=True, encoding="utf-8")
-                d = json.loads(r.stdout or "{}")
+                r = _rnw([sys.executable,
+                             os.path.join(self._tools_dir(), "fairy_capture.py"),
+                             "--mode", "ocr"], capture_output=True, timeout=120,
+                            text=True, encoding="utf-8", errors="replace")
+                d = json.loads((r.stdout or "{}").strip().splitlines()[-1] or "{}")
                 if not d.get("ok"):
-                    self.say("识别失败", "warn")
-                    self._bubble("识别失败：" + str(d.get("error"))[:60], 4)
+                    self.say("已取消" if "cancel" in str(d) else "识别失败", "warn")
                     return
                 lines = d.get("lines") or []
                 if not lines:
-                    self.say("屏幕上没有识别到文字", "ok")
-                    self._bubble("屏幕上没识别到文字", 3)
+                    self.say("选区里没有识别到文字", "ok")
+                    self._bubble("选区里没识别到文字", 3)
                     return
                 self.say("识别到%d行文字" % len(lines), "ok")
-                self._bubble("识别到 %d 行：%s" % (len(lines), " | ".join(lines)[:200]), 10)
+                self._bubble("识别到 %d 行：%s" % (len(lines),
+                                                " | ".join(lines)[:200]), 10)
             except Exception as e:
                 self.say("识别失败", "warn")
                 self._bubble("OCR 失败：" + str(e)[:60], 4)
         threading.Thread(target=_work, daemon=True).start()
 
     def _vision_ocr_region(self):
-        """区域截图识别文字（弹窗输入 x y 宽 高，气泡 + 语音播报）。"""
-        import tkinter.simpledialog as _sd
-        import subprocess as _sp
-        val = _sd.askstring("区域截图识别文字", "输入区域（屏幕坐标）：x y 宽 高\n例如：200 100 900 600",
-                            parent=self)
-        if val is None or not val.strip():
-            return
-        parts = val.split()
-        if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts):
-            self._bubble("格式不对：需要 x y 宽 高 四个数字", 4)
-            return
-
-        def _work():
-            try:
-                r = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_ocr.py"),
-                             "--region"] + parts + ["--json"], capture_output=True,
-                            timeout=60, text=True, encoding="utf-8")
-                d = json.loads(r.stdout or "{}")
-                lines = d.get("lines") or []
-                self.say("识别到%d行文字" % len(lines), "ok")
-                self._bubble("识别到 %d 行：%s" % (len(lines), " | ".join(lines)[:200]),
-                             10 if lines else 3)
-            except Exception as e:
-                self.say("识别失败", "warn")
-                self._bubble("OCR 失败：" + str(e)[:60], 4)
-        threading.Thread(target=_work, daemon=True).start()
+        """（已下线）区域截图识别改为微信风格选框，入口见 _vision_ocr。"""
 
     def _vision_detect(self):
-        """截图目标检测（YOLO11n，复用 funasr 环境的 torch，气泡 + 语音播报）。"""
+        """★ 2026-10-12【选框识别物体】微信风格截图选区域 -> YOLO 检测区域物体。"""
         import subprocess as _sp
 
         def _work():
-            self.say("正在识别图中物体", "doing")
+            self.say("拖拽选择要识别的区域", "doing")
             try:
-                r = _rnw([self._funasr_py(), os.path.join(self._tools_dir(), "fairy_detect.py"),
-                             "--full", "--json"], capture_output=True, timeout=120,
-                            text=True, encoding="utf-8")
-                d = json.loads(r.stdout or "{}")
+                r = _rnw([sys.executable,
+                             os.path.join(self._tools_dir(), "fairy_capture.py"),
+                             "--mode", "detect"], capture_output=True, timeout=150,
+                            text=True, encoding="utf-8", errors="replace")
+                d = json.loads((r.stdout or "{}").strip().splitlines()[-1] or "{}")
                 if not d.get("ok"):
-                    self.say("识别失败", "warn")
-                    self._bubble("检测失败：" + str(d.get("error"))[:60], 4)
+                    self.say("已取消" if "cancel" in str(d) else "识别失败", "warn")
                     return
                 objs = d.get("objects") or []
                 if not objs:
-                    self.say("没有检测到物体", "ok")
-                    self._bubble("没检测到物体", 3)
+                    self.say("选区里没有检测到物体", "ok")
+                    self._bubble("选区里没检测到物体", 3)
                     return
                 labels = "、".join(o["label"] for o in objs[:8])
                 self.say("检测到%d个物体：%s" % (len(objs), labels), "ok")
@@ -3280,69 +3383,209 @@ class FairyBall(tk.Tk):
                 "nearlink": "星闪", "nearby": "星闪"}.get(kind, kind or "设备")
 
     def _iot_scan(self):
-        """扫描新设备并询问使用者是否连接（★ 弹窗授权 + 按通道分类播报）。"""
+        """★ 2026-10-12【无窗扫描】扫描进度直接画在球右侧进度条面板；
+        完成后语音+气泡播报结果，有新设备自动连接。不再弹任何窗口。
+        防重入：扫描/连接期间重复点击只提示。"""
         import subprocess as _sp
+        if getattr(self, "_iot_scanning", False):
+            self._bubble("正在扫描设备，请稍候…", 3)
+            return
+        self._iot_scanning = True
 
         def _work():
             self.say("设备正在自检中，扫描局域网、蓝牙和智能设备", "doing")
+            self._ball_progress(3, "设备自检 · 启动扫描", True)
+            _json_buf = []
             try:
-                r = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_iot.py"),
-                             "--connect", "--json"], capture_output=True, timeout=180,
-                            text=True, encoding="utf-8")
-                d = json.loads(r.stdout or "{}")
-                if not d.get("ok"):
-                    self.say("扫描失败", "warn")
-                    self._bubble("扫描失败：" + str(d.get("error"))[:60], 4)
-                    return
-                newd = d.get("new_devs") or []
-                confirmed = d.get("confirmed")
-                if not confirmed and newd:
-                    self.say("已取消连接", "ok")
-                    self._bubble("已取消连接：%d 个新设备未连接" % len(newd), 5)
-                    return
-                if newd:
-                    groups = {}
-                    for x in newd:
-                        k = self._kind_cn(x.get("kind"))
-                        groups.setdefault(k, []).append(str(x.get("name") or x.get("id")))
-                    parts = "，".join("发现%s%d个" % (k, len(v)) for k, v in groups.items())
-                    names = "、".join("%s%s" % (g, "：" + "、".join(vs[:3])) for g, vs in groups.items())
-                    self.say("已连接%d个新设备，%s" % (len(newd), parts), "ok")
-                    self._bubble("%s\n%s" % (parts, names), 8)
-                else:
-                    self.say("没有新设备，当前%d个设备在线" % (d.get("count") or 0), "ok")
-                    self._bubble("没有新设备，当前 %d 个设备在线" % (d.get("count") or 0), 4)
-            except Exception as e:
+                _p = _sp.Popen([sys.executable,
+                                os.path.join(self._tools_dir(), "fairy_iot.py"),
+                                "--scan", "all", "--json", "--progress"],
+                               stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True,
+                               encoding="utf-8", errors="replace", bufsize=1,
+                               creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+                for _line in _p.stdout:
+                    _line = (_line or "").strip()
+                    if not _line:
+                        continue
+                    if _line.startswith("P|"):
+                        _ps = _line[2:].split("|")
+                        if len(_ps) >= 3:
+                            _st, _pct_v, _n = _ps[0], int(_ps[1]), int(_ps[2])
+                            self._ball_progress(_pct_v, "设备自检 · %s · 已发现 %d 个"
+                                                % (_st, _n), True)
+                    else:
+                        _json_buf.append(_line)
+                _p.wait(timeout=200)
+            except Exception as _pe:
+                self._iot_scanning = False
+                self._ball_progress(0, "", False)
                 self.say("设备扫描失败", "warn")
-                self._bubble("扫描失败：" + str(e)[:60], 4)
+                self._bubble("扫描失败：" + str(_pe)[:60], 4)
+                return
+            try:
+                d = json.loads("".join(_json_buf) or "{}")
+            except Exception:
+                d = {}
+            if not d.get("ok"):
+                self._iot_scanning = False
+                self._ball_progress(0, "", False)
+                self.say("扫描失败", "warn")
+                self._bubble("扫描失败：" + str(d.get("error"))[:60], 4)
+                return
+            newd = d.get("new_devs") or []
+            total = d.get("count") or 0
+            self._ball_progress(0, "", False)
+            if not newd:
+                self._iot_scanning = False
+                self.say("没有新设备，当前%d个设备在线" % total, "ok")
+                self._bubble("没有新设备，当前 %d 个设备在线" % total, 5)
+                return
+            self._ball_progress(60, "设备自检 · 连接 %d 个新设备…" % len(newd), True)
+            try:
+                r = _rnw([sys.executable,
+                          os.path.join(self._tools_dir(), "fairy_iot.py"),
+                          "--connect", "--yes", "--json"], capture_output=True,
+                         timeout=180, text=True, encoding="utf-8", errors="replace")
+                dd = json.loads(r.stdout or "{}")
+            except Exception as e:
+                dd = {"ok": False, "error": str(e)}
+            self._ball_progress(0, "", False)
+            self._iot_scanning = False
+            if not dd.get("ok"):
+                self.say("连接失败", "warn")
+                self._bubble("连接失败：" + str(dd.get("error"))[:60], 4)
+                return
+            groups = {}
+            for x in newd:
+                k = self._kind_cn(x.get("kind"))
+                groups.setdefault(k, []).append(str(x.get("name") or x.get("id")))
+            parts = "。".join("发现%s%d个" % (k, len(v)) for k, v in groups.items())
+            names = "、".join("%s%s" % (g, "：" + "、".join(vs[:3]))
+                                  for g, vs in groups.items())
+            self.say("已连接%d个新设备，%s" % (len(newd), parts), "ok")
+            self._bubble("%s\n%s" % (parts, names), 8)
+            # ★ 2026-10-12【未标记提醒】新设备里没起名的，语音+气泡提醒去标记
+            _untag = [x for x in newd if not (x.get("tag") or "").strip()]
+            if _untag:
+                self.say("还有%d个新设备未标记，可以在控制面板的设备列表里给它们起名字"
+                         % len(_untag), "warn")
+                self._bubble("%d 个新设备未标记：面板→网络与设备→设备列表→点「标记」起名"
+                             % len(_untag), 8)
         threading.Thread(target=_work, daemon=True).start()
 
     def _iot_devices(self):
-        """列出已连接设备（播报：已连接XX）。"""
+        """★ 2026-10-12【设备列表】统一风格窗口：自动分「已标记 / 未标记」，
+        未标记设备行尾带「标记」按钮，点一下直接起名（不再手动输 ID）。"""
         import subprocess as _sp
+        import tkinter.simpledialog as _sd
 
         def _work():
             try:
                 r = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_iot.py"),
                              "--devices", "--json"], capture_output=True, timeout=30,
-                            text=True, encoding="utf-8")
+                            text=True, encoding="utf-8", errors="replace")
                 d = json.loads(r.stdout or "{}")
                 devs = d.get("devices") or []
-                if not devs:
-                    self.say("还没有已连接设备", "ok")
-                    self._bubble("还没有已连接设备（先去「扫描新设备」）", 4)
-                    return
-                labels = []
-                for x in devs:
-                    nm = x.get("tag") or x.get("name") or x.get("id")
-                    if x.get("type") and x.get("type") != "未知设备":
-                        labels.append("%s（%s）" % (nm, x.get("type")))
-                    else:
-                        labels.append(nm)
-                self.say("已连接%d个设备" % len(devs), "ok")
-                self._bubble("已连接 %d 个设备：%s" % (len(devs), "、".join(labels[:12])), 10)
             except Exception as e:
-                self._bubble("查询失败：" + str(e)[:60], 4)
+                self._bubble("查询设备失败：" + str(e)[:60], 4)
+                return
+
+            win, wrap = self._dialog("设备列表（分类 / 标记）", 520, 420)
+            _cv = tk.Canvas(wrap, bg="#f2f3f5", highlightthickness=0)
+            _sb = tk.Scrollbar(wrap, orient="vertical", command=_cv.yview)
+            _cv.configure(yscrollcommand=_sb.set)
+            _sb.pack(side="right", fill="y")
+            _cv.pack(side="left", fill="both", expand=True)
+            _inner = tk.Frame(_cv, bg="#f2f3f5")
+            _wid = _cv.create_window((0, 0), window=_inner, anchor="nw")
+
+            def _fit(_e):
+                _cv.itemconfigure(_wid, width=max(120, _cv.winfo_width() - 8))
+                _cv.configure(scrollregion=_cv.bbox("all"))
+            _cv.bind("<Configure>", _fit)
+
+            def _bind_wheel(_w):
+                _w.bind("<MouseWheel>", lambda _ev: _cv.yview_scroll(
+                    int(-1 * (_ev.delta / 120)), "units"))
+                for _c in _w.winfo_children():
+                    _bind_wheel(_c)
+
+            if not devs:
+                tk.Label(_inner, text="还没有已连接设备（先去「扫描新设备」）",
+                         bg="#f2f3f5", fg="#6e7888",
+                         font=("SimHei", 13)).pack(anchor="w", pady=10)
+                _bind_wheel(_inner)
+                return
+
+            _tagged = [x for x in devs if (x.get("tag") or "").strip()]
+            _untagged = [x for x in devs if not (x.get("tag") or "").strip()]
+
+            _KCN = {"lan": "局域网", "bt": "蓝牙", "mdns": "组播/投屏",
+                    "serial": "串口", "nearlink": "星闪", "nearby": "近距离"}
+
+            def _fmt(x):
+                # ★ 2026-10-12【自动区分】每行带厂商 + 通道 + 类型 + IP + MAC(后6位)，
+                #   同局域网设备凭 MAC/IP/厂商一眼区分谁是谁。
+                _n = x.get("tag") or x.get("name") or x.get("id") or "?"
+                _t = x.get("type") or ""
+                _v = x.get("vendor") or ""
+                _k = _KCN.get(str(x.get("kind") or x.get("adapter") or ""), "")
+                _ip = str(x.get("ip") or "").strip()
+                _mac = str(x.get("id") or "")
+                for _p in ("ble:", "lan:", "nearlink:", "nearby:", "serial:"):
+                    _mac = _mac.replace(_p, "")
+                _mac = (_mac[-6:] if len(_mac) > 6 else _mac)
+                _bits = [b for b in (_v, _k, _t, _ip, _mac) if b and b != "未知设备"]
+                _s = " · ".join(_bits)
+                return ("%s（%s）" % (_n, _s)) if _s else str(_n)
+
+            def _do_tag(x):
+                _tag = _sd.askstring("标记设备", "给「%s」起个名字（例如：卧室灯）："
+                                     % (x.get("name") or x.get("id")), parent=win)
+                if not (_tag or "").strip():
+                    return
+                try:
+                    _r2 = _rnw([sys.executable,
+                                   os.path.join(self._tools_dir(), "fairy_iot.py"),
+                                   "--tag", str(x.get("id")), _tag.strip(), "--json"],
+                                  capture_output=True, timeout=30, text=True,
+                                  encoding="utf-8")
+                    _d2 = json.loads(_r2.stdout or "{}")
+                    self._bubble(("已标记：%s" % _tag.strip()) if _d2.get("ok")
+                                 else ("标记失败：" + str(_d2.get("msg") or "")[:50]), 4)
+                    win.destroy()
+                    self._iot_devices()      # 刷新列表
+                except Exception as _e2:
+                    self._bubble("标记失败：" + str(_e2)[:60], 4)
+
+            def _sec(title, items, can_tag):
+                if not items:
+                    return
+                tk.Label(_inner, text=title + "（%d）" % len(items), bg="#f2f3f5",
+                         fg="#52749b", font=("SimHei", 15, "bold")
+                         ).pack(anchor="w", pady=(10, 4))
+                for _x in items:
+                    _rowf = tk.Frame(_inner, bg="#f2f3f5")
+                    _rowf.pack(fill="x", pady=2)
+                    tk.Label(_rowf, text=_fmt(_x), bg="#f2f3f5", fg="#46536a",
+                             font=("SimHei", 12), width=38, anchor="w"
+                             ).pack(side="left", padx=4)
+                    if can_tag:
+                        _img = _pil_round("标记", 64, 34, 10, "#ffffff", "#52749b",
+                                          True, "#dfe3ea")[0]
+                        _b = tk.Button(_rowf, image=_img, bd=0, relief="flat",
+                                       highlightthickness=0, bg="#f2f3f5",
+                                       activebackground="#f2f3f5", cursor="hand2",
+                                       command=lambda x=_x: _do_tag(x))
+                        _b.image = _img
+                        _b.pack(side="right", padx=4)
+                    else:
+                        tk.Label(_rowf, text="✓ 已标记", bg="#f2f3f5", fg="#8d97a8",
+                                 font=("SimHei", 12)).pack(side="right", padx=6)
+
+            _sec("已标记", _tagged, False)
+            _sec("未标记", _untagged, True)
+            _bind_wheel(_inner)
         threading.Thread(target=_work, daemon=True).start()
 
     def _iot_tag(self):
@@ -3354,7 +3597,7 @@ class FairyBall(tk.Tk):
             try:
                 r = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_iot.py"),
                              "--devices", "--json"], capture_output=True, timeout=30,
-                            text=True, encoding="utf-8")
+                            text=True, encoding="utf-8", errors="replace")
                 d = json.loads(r.stdout or "{}")
                 devs = d.get("devices") or []
                 if not devs:
@@ -3379,7 +3622,7 @@ class FairyBall(tk.Tk):
                     return
                 r2 = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_iot.py"),
                               "--tag", did, tag.strip(), "--json"], capture_output=True,
-                             timeout=30, text=True, encoding="utf-8")
+                             timeout=30, text=True, encoding="utf-8", errors="replace")
                 d2 = json.loads(r2.stdout or "{}")
                 if d2.get("ok"):
                     self.say("已标记：%s" % tag.strip(), "ok")
@@ -3399,7 +3642,7 @@ class FairyBall(tk.Tk):
             try:
                 r = _rnw([sys.executable, os.path.join(self._tools_dir(), "fairy_security.py"),
                              "--check", "--json"], capture_output=True, timeout=60,
-                            text=True, encoding="utf-8")
+                            text=True, encoding="utf-8", errors="replace")
                 d = json.loads(r.stdout or "{}")
                 if not d.get("ok") and "items" not in d:
                     self.say("安全自检失败", "warn")
@@ -3427,7 +3670,7 @@ class FairyBall(tk.Tk):
         while True:
             try:
                 r = _rnw(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-                            capture_output=True, text=True, timeout=5, encoding="utf-8",
+                            capture_output=True, text=True, timeout=5, encoding="utf-8", errors="replace",
                             creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
                 cur = (r.stdout or "").strip()
             except Exception:
@@ -3442,52 +3685,38 @@ class FairyBall(tk.Tk):
                     pass
             time.sleep(1.5)
 
-    def _clip_panel(self):
-        """剪贴板历史面板：列出最近条目，输入编号复制回剪贴板。"""
-        import tkinter.simpledialog as _sd
-        import subprocess as _sp
-        try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import fairy_clip as _fc
-            items = _fc.list_items()
-            if not items:
-                self._bubble("还没有剪贴板历史（复制过内容后自动记录）", 4)
-                return
-            menu = "\n".join("[%d] %s %s" % (i, x["time"], x["text"][:60])
-                             for i, x in enumerate(items[:20]))
-            idx = _sd.askstring("剪贴板历史", "输入编号复制回剪贴板：\n\n%s" % menu, parent=self)
-            if idx is None or not idx.strip() or not idx.strip().isdigit():
-                return
-            n = int(idx.strip())
-            t = _fc.get(n)
-            if t is None:
-                self._bubble("没有这条（编号 0-%d）" % (len(items) - 1), 4)
-                return
-            _rnw(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $input"],
-                    input=t, text=True, capture_output=True, timeout=10, encoding="utf-8")
-            self.say("已复制第%d条剪贴板历史" % n, "ok")
-            self._bubble("已复制：" + t[:120], 5)
-        except Exception as e:
-            self._bubble("剪贴板历史失败：" + str(e)[:60], 4)
 
     def _remind_add(self):
-        """定时提醒：输入分钟后+内容，到点播报。"""
-        import tkinter.simpledialog as _sd
-        val = _sd.askstring("定时提醒", "多久后提醒（分钟）？", parent=self, initialvalue="10")
-        if val is None or not val.strip():
-            return
-        try:
-            mins = float(val)
-        except ValueError:
-            self._bubble("分钟数不对", 3)
-            return
-        msg = _sd.askstring("定时提醒", "提醒内容（如：去接孩子）", parent=self,
-                            initialvalue="到时间了")
-        if msg is None:
-            return
-        self._reminders.append((time.time() + mins * 60, msg.strip() or "到时间了"))
-        self.say("好的，%g 分钟后提醒你" % mins, "ok")
-        self._bubble("已设提醒：%g 分钟后「%s」" % (mins, msg.strip()), 4)
+        """★ 2026-10-12【定时提醒】统一风格弹窗：分钟 + 内容。"""
+        win, wrap = self._dialog("定时提醒", 420, 260)
+        tk.Label(wrap, text="多久后提醒（分钟）？", bg="#f2f3f5", fg="#6e7888",
+                 font=("SimHei", 13)).pack(anchor="w", pady=(6, 2))
+        _mins = tk.Entry(wrap, width=10, font=("SimHei", 13))
+        _mins.insert(0, "10")
+        _mins.pack(anchor="w", pady=(0, 10))
+        tk.Label(wrap, text="提醒内容", bg="#f2f3f5", fg="#6e7888",
+                 font=("SimHei", 13)).pack(anchor="w", pady=(0, 2))
+        _msg = tk.Entry(wrap, width=34, font=("SimHei", 13))
+        _msg.insert(0, "到时间了")
+        _msg.pack(anchor="w")
+
+        def _ok():
+            try:
+                mins = float(_mins.get().strip())
+            except ValueError:
+                self._bubble("分钟数不对", 3)
+                return
+            t = _msg.get().strip() or "到时间了"
+            self._reminders.append((time.time() + mins * 60, t))
+            self.say("好的，%g 分钟后提醒你" % mins, "ok")
+            self._bubble("已设提醒：%g 分钟后「%s」" % (mins, t), 4)
+            win.destroy()
+        _row = tk.Frame(wrap, bg="#f2f3f5")
+        _row.pack(anchor="w", pady=(12, 0))
+        self._dlg_btn(_row, "确定", _ok)
+        self._dlg_btn(_row, "取消", win.destroy)
+        win.bind("<Return>", lambda _ev: _ok())
+        _mins.focus_force()
 
     def _remind_loop(self):
         """提醒后台线程：到点播报（定时提醒 + 待办到期，已播的待办去重）。"""
@@ -3600,7 +3829,7 @@ class FairyBall(tk.Tk):
         _items = [("time", "时间问候"), ("location", "当前位置"), ("weather", "天气"),
                   ("dress", "穿衣建议"), ("news", "新闻"), ("status", "服务状态"),
                   ("devices", "已连接设备数"), ("holiday", "今日节日/节气"),
-                  ("todo", "今日待办"), ("network", "网络状态"), ("battery", "电量")]
+                  ("todo", "今日待办"), ("network", "网络状态"), ("api_balance", "API 余额")]
         cur = {}
         try:
             with open(fairy_root.CONFIG, encoding="utf-8") as _f:
@@ -3639,91 +3868,17 @@ class FairyBall(tk.Tk):
         tk.Button(win, text="取消", command=win.destroy,
                   font=("SimHei", 12)).pack(pady=(0, 8))
 
-    def _todo_panel(self):
-        """★ 2026-10-11【待办清单】弹窗：列表 + 添加 + 完成/删除。"""
-        win = tk.Toplevel(self)
-        win.title("待办清单")
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_screenwidth() // 2 - 210,
-                                 self.winfo_screenheight() // 2 - 180))
-        _box = tk.Listbox(win, width=46, height=12, font=("SimHei", 12))
-        _box.pack(padx=10, pady=6)
-
-        def _refresh():
-            _box.delete(0, "end")
-            try:
-                sys.path.insert(0, self._tools_dir())
-                import fairy_todo as _ft
-                for i, x in enumerate(_ft.list_items()):
-                    _box.insert("end", "[%d] %s%s %s%s" % (
-                        i, "完成" if x.get("done") else "待办",
-                        "  " + x["text"],
-                        " @" + x["at"] if x.get("at") else "",
-                        "  ←已到期" if (x.get("at") and x["at"] <= time.strftime("%H:%M")
-                                       and not x.get("done")) else ""))
-            except Exception:
-                pass
-        _refresh()
-        _ent = tk.Entry(win, width=46, font=("SimHei", 12))
-        _ent.pack(padx=10, pady=(0, 4))
-        _hint = tk.Label(win, text="添加：内容|时间（如 交报告|14:30，时间可省）",
-                         font=("SimHei", 11), fg="#666666")
-        _hint.pack(anchor="w", padx=10)
-
-        def _add():
-            t = _ent.get().strip()
-            if not t:
-                return
-            at = ""
-            if "|" in t:
-                t, at = t.split("|", 1)
-            try:
-                sys.path.insert(0, self._tools_dir())
-                import fairy_todo as _ft
-                _ft.add(t.strip(), at.strip())
-                self.say("已添加待办" + ("" if not at else "，" + at.strip() + " 提醒"), "ok")
-            except Exception:
-                pass
-            _ent.delete(0, "end")
-            _refresh()
-
-        def _done():
-            try:
-                s = _box.get("active").split("]")[0].strip("[").strip()
-                sys.path.insert(0, self._tools_dir())
-                import fairy_todo as _ft
-                _ft.done(int(s))
-            except Exception:
-                pass
-            _refresh()
-
-        def _del():
-            try:
-                s = _box.get("active").split("]")[0].strip("[").strip()
-                sys.path.insert(0, self._tools_dir())
-                import fairy_todo as _ft
-                _ft.delete(int(s))
-            except Exception:
-                pass
-            _refresh()
-
-        _row = tk.Frame(win)
-        _row.pack(pady=(2, 8))
-        tk.Button(_row, text="添加", command=_add, font=("SimHei", 12)).pack(side="left", padx=4)
-        tk.Button(_row, text="勾选完成（选中条目）", command=_done,
-                  font=("SimHei", 12)).pack(side="left", padx=4)
-        tk.Button(_row, text="删除（选中条目）", command=_del,
-                  font=("SimHei", 12)).pack(side="left", padx=4)
-
     def _screenshot_anno(self):
-        """★ 2026-10-11【截图标注】用 pythonw 启动标注窗口（无控制台）。"""
+        """★ 2026-10-12【微信风格截图标注】全屏遮罩拖拽选区域 -> 选区标注。
+        用 pythonw 启动（无控制台），选区后进入标注窗口（画框/箭头/文字）。"""
         try:
             _d = self._tools_dir()
             _w = os.path.join(os.path.dirname(_d), "pythonw.exe")
-            _p = os.path.join(_d, "fairy_screenshot.py")
+            _p = os.path.join(_d, "fairy_capture.py")
             if not os.path.exists(_w):
                 _w = sys.executable
-            _rnw([_w, _p], timeout=3)
+            _rnw([_w, _p, "--mode", "annotate"], timeout=3)
+            self._bubble("拖拽选择截图区域，松开后进入标注", 3)
         except Exception as _e:
             self._bubble("截图标注启动失败：" + str(_e)[:50], 4)
 
@@ -3748,7 +3903,7 @@ class FairyBall(tk.Tk):
                           "$mem=100*(1-$m.FreePhysicalMemory/$m.TotalVisibleMemorySize);"
                           "$d=Get-PSDrive C | Select-Object @{n='u';e={[math]::Round($_.Used/$_.Size*100,0)}};"
                           "Write-Output ('{0:N0}|{1:N0}|{2}' -f $c,$mem,$d.u)"],
-                         capture_output=True, text=True, timeout=25, encoding="utf-8")
+                         capture_output=True, text=True, timeout=25, encoding="utf-8", errors="replace")
             _c, _m, _d = _r.stdout.strip().split("|")
             self._bubble("CPU %s%% · 内存 %s%% · C盘 %s%%" % (_c, _m, _d), 6)
             self.say("当前 CPU %s%%，内存 %s%%，C 盘占用 %s%" % (_c, _m, _d), "ok")
@@ -3807,28 +3962,30 @@ class FairyBall(tk.Tk):
             self._bubble("操作失败：" + str(_e)[:50], 4)
 
     def _night_set(self):
-        """★ 2026-10-11【夜间模式设置】弹窗：时段 + 开关。"""
+        """★ 2026-10-12【夜间模式设置】统一风格弹窗：时段 + 开关。"""
         _cur = {"night": True, "start": "22:00", "end": "07:00"}
         try:
             with open(fairy_root.CONFIG, encoding="utf-8") as _f:
                 _cur.update((json.load(_f).get("dnd") or {}))
         except Exception:
             pass
-        win = tk.Toplevel(self)
-        win.title("夜间模式")
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_screenwidth() // 2 - 150,
-                                 self.winfo_screenheight() // 2 - 140))
-        win.resizable(False, False)
+        win, wrap = self._dialog("夜间模式", 420, 280)
+        _bg = "#f2f3f5"
         _on = tk.BooleanVar(value=bool(_cur.get("night", True)))
-        tk.Checkbutton(win, text="开启夜间模式（到点自动静音播报）", variable=_on,
-                       anchor="w", font=("SimHei", 12)).pack(fill="x", padx=18, pady=8)
+        tk.Checkbutton(wrap, text="开启夜间模式（到点自动静音播报）", variable=_on,
+                       anchor="w", bg=_bg, fg="#46536a", activebackground=_bg,
+                       selectcolor=_bg, font=("SimHei", 12)
+                       ).pack(fill="x", pady=6)
         _st = tk.StringVar(value=_cur.get("start", "22:00"))
         _en = tk.StringVar(value=_cur.get("end", "07:00"))
-        tk.Label(win, text="开始时间（如 22:00）", font=("SimHei", 12)).pack(anchor="w", padx=18)
-        tk.Entry(win, textvariable=_st, width=14, font=("SimHei", 12)).pack(anchor="w", padx=18, pady=2)
-        tk.Label(win, text="结束时间（如 07:00）", font=("SimHei", 12)).pack(anchor="w", padx=18)
-        tk.Entry(win, textvariable=_en, width=14, font=("SimHei", 12)).pack(anchor="w", padx=18, pady=2)
+        tk.Label(wrap, text="开始时间（如 22:00）", bg=_bg, fg="#6e7888",
+                 font=("SimHei", 13)).pack(anchor="w")
+        tk.Entry(wrap, textvariable=_st, width=14, font=("SimHei", 13)
+                 ).pack(anchor="w", pady=(2, 8))
+        tk.Label(wrap, text="结束时间（如 07:00）", bg=_bg, fg="#6e7888",
+                 font=("SimHei", 13)).pack(anchor="w")
+        tk.Entry(wrap, textvariable=_en, width=14, font=("SimHei", 13)
+                 ).pack(anchor="w", pady=(2, 6))
 
         def _save():
             try:
@@ -3842,73 +3999,11 @@ class FairyBall(tk.Tk):
             except Exception as _e:
                 self._bubble("保存失败：" + str(_e)[:50], 4)
             win.destroy()
-        tk.Button(win, text="保存", command=_save, font=("SimHei", 12)).pack(pady=(10, 6))
+        _row = tk.Frame(wrap, bg=_bg)
+        _row.pack(anchor="w", pady=(8, 0))
+        self._dlg_btn(_row, "保存", _save)
+        self._dlg_btn(_row, "取消", win.destroy)
 
-    def _custom_cmd_panel(self):
-        """★ 2026-10-11【自定义指令管理】弹窗：列表 + 添加 + 删除。"""
-        win = tk.Toplevel(self)
-        win.title("自定义指令")
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_screenwidth() // 2 - 230,
-                                 self.winfo_screenheight() // 2 - 200))
-        _box = tk.Listbox(win, width=56, height=10, font=("SimHei", 12))
-        _box.pack(padx=10, pady=6)
-
-        def _refresh():
-            _box.delete(0, "end")
-            try:
-                sys.path.insert(0, self._tools_dir())
-                import fairy_custom_cmd as _fc
-                for i, c in enumerate(_fc._load()):
-                    _box.insert("end", "[%d] %s → %s: %s" % (
-                        i, c.get("trigger"), c.get("type"), c.get("target")))
-            except Exception:
-                pass
-        _refresh()
-        _f1 = tk.Frame(win); _f1.pack(padx=10, pady=2)
-        tk.Label(_f1, text="说：", font=("SimHei", 12)).pack(side="left")
-        _e1 = tk.Entry(_f1, width=14, font=("SimHei", 12)); _e1.pack(side="left")
-        tk.Label(_f1, text="  做：", font=("SimHei", 12)).pack(side="left")
-        _e2 = tk.Entry(_f1, width=20, font=("SimHei", 12)); _e2.pack(side="left")
-        _f2 = tk.Frame(win); _f2.pack(padx=10, pady=2)
-        _v = tk.StringVar(value="say")
-        for _k, _nm in (("app", "打开软件"), ("url", "打开网页"),
-                        ("say", "回复一句"), ("cmd", "运行命令")):
-            tk.Radiobutton(_f2, text=_nm, variable=_v, value=_k,
-                           font=("SimHei", 12)).pack(side="left", padx=4)
-
-        def _add():
-            tr = _e1.get().strip(); tg = _e2.get().strip()
-            if not tr or not tg:
-                return
-            try:
-                sys.path.insert(0, self._tools_dir())
-                import fairy_custom_cmd as _fc
-                _fc.add(tr, _v.get(), tg)
-                self.say("自定义指令已添加：" + tr, "ok")
-            except Exception:
-                pass
-            _e1.delete(0, "end"); _e2.delete(0, "end")
-            _refresh()
-
-        def _del():
-            try:
-                s = _box.get("active").split("]")[0].strip("[").strip()
-                sys.path.insert(0, self._tools_dir())
-                import fairy_custom_cmd as _fc
-                _fc.remove(int(s))
-            except Exception:
-                pass
-            _refresh()
-
-        _row = tk.Frame(win); _row.pack(pady=(4, 8))
-        tk.Button(_row, text="添加", command=_add, font=("SimHei", 12)).pack(side="left", padx=6)
-        tk.Button(_row, text="删除（选中条目）", command=_del,
-                  font=("SimHei", 12)).pack(side="left", padx=6)
-        tk.Label(win, text="例：说「查快递」→ 打开软件「拼多多」；说「网怎么了」→ 运行命令「网络诊断」",
-                 font=("SimHei", 11), fg="#666666").pack(padx=10, pady=(0, 6))
-
-    # ---- 窗口守护的菜单动作 ----
     def _wg_toggle(self, key, name):
         try:
             if getattr(self, "wguard", None) is None:
@@ -3942,27 +4037,59 @@ class FairyBall(tk.Tk):
         except Exception as _e:
             print("[fairy] 立即审核失败: %s" % _e, flush=True)
 
-    def _set_city_prompt(self):
+    # ---- 听歌识曲（Shazam 指纹识别，默认关闭）----
+    def _result_win(self, title, text):
+        """★ 2026-10-12【结果窗】统一风格弹窗显示多行结果（可滚动）。"""
+        win, wrap = self._dialog(title, 540, 360)
+        _cv = tk.Canvas(wrap, bg="#f2f3f5", highlightthickness=0)
+        _sb = tk.Scrollbar(wrap, orient="vertical", command=_cv.yview)
+        _cv.configure(yscrollcommand=_sb.set)
+        _sb.pack(side="right", fill="y")
+        _cv.pack(side="left", fill="both", expand=True)
+        _inner = tk.Frame(_cv, bg="#f2f3f5")
+        _wid = _cv.create_window((0, 0), window=_inner, anchor="nw")
+
+        def _fit(_e):
+            _cv.itemconfigure(_wid, width=max(120, _cv.winfo_width() - 8))
+            _cv.configure(scrollregion=_cv.bbox("all"))
+        _cv.bind("<Configure>", _fit)
+
+        def _bind_wheel(_w):
+            _w.bind("<MouseWheel>", lambda _ev: _cv.yview_scroll(
+                int(-1 * (_ev.delta / 120)), "units"))
+            for _c in _w.winfo_children():
+                _bind_wheel(_c)
+        for _ln in str(text).splitlines():
+            tk.Label(_inner, text=_ln, bg="#f2f3f5", fg="#46536a",
+                     font=("SimHei", 12), justify="left", anchor="w",
+                     wraplength=460).pack(fill="x", padx=8, pady=2)
+        _bind_wheel(_inner)
+
+
+    def _songrec_toggle(self):
+        """★ 2026-10-12【听歌识曲两态】开/关后台循环（按钮显示当前状态）。
+        默认关闭，用户点开才识别。"""
+        self._songrec_on = not getattr(self, "_songrec_on", False)
+        _st = "开启" if self._songrec_on else "停止"
+        self._bubble("听歌识曲已" + _st, 3)
         try:
-            import tkinter.simpledialog as _sd
-            c = _sd.askstring("自定义城市", "输入城市名（如：濮阳）",
-                              parent=self, initialvalue=self.city or "")
-            if c and c.strip():
-                self._set_city(c.strip())
+            self.say("听歌识曲已" + _st, "ok")
         except Exception:
             pass
 
-    # ---- 听歌识曲（Shazam 指纹识别，常开）----
     def _songrec_now(self):
         """★ 2026-10-11【快捷操作】立即听歌识曲（绕过 18 秒节流）。"""
         self._songrec_at = 0
         threading.Thread(target=self._songrec_identify, daemon=True).start()
 
     def _songrec_loop(self):
-        """后台循环：每 18 秒抓系统声音识别一次（同一首歌不重复报）。"""
+        """后台循环：每 18 秒抓系统声音识别一次（同一首歌不重复报）。
+        两态开关：_songrec_on=False 时跳过识别。"""
         while True:
             time.sleep(5)
             try:
+                if not getattr(self, "_songrec_on", False):
+                    continue
                 if time.time() - self._songrec_at < 18:
                     continue
                 self._songrec_at = time.time()
@@ -3984,10 +4111,160 @@ class FairyBall(tk.Tk):
         if not sig.strip("|") or sig == self._songrec_last:
             return
         self._songrec_last = sig
-        _t = "识别到：《%s》 - %s" % (r.get("title") or "?", r.get("artist") or "?")
+        _t = "识别到：《%s》 - %s" % (fix_mojibake(r.get("title") or "?"),
+                                   fix_mojibake(r.get("artist") or "?"))   # ★ 乱码自愈
         if r.get("link"):
             _t += "\n" + r["link"]
         self._wg_bubbles.append(_t)
+
+    def _boot_progress(self):
+        """★ 2026-10-12【启动进度 v4】不再弹独立进度气泡，
+        进度直接画在球右侧进度条面板：阶段名 + 百分比，全部就绪后自动清空。"""
+        try:
+            import socket as _sock
+            import threading as _th
+
+            def _port_up(_port, _host="127.0.0.1", _t=0.25):
+                try:
+                    _s = _sock.socket()
+                    _s.settimeout(_t)
+                    _s.connect((_host, _port))
+                    _s.close()
+                    return True
+                except Exception:
+                    return False
+
+            # ★ 2026-10-12【启动默认游戏模式】启动进度跳过引擎三阶段：
+            #   每次启动先进游戏模式 -> 引擎不探测、不拉起、不加载模型，
+            #   启动完成后 _boot_pick_game 释放全部引擎；要对话时面板手动切组合。
+            _STAGES = [
+                ("加载语音素材", lambda: bool(os.path.exists(VOICE_INDEX)
+                                           and os.path.getsize(VOICE_INDEX) > 0)),
+                ("连接本地大脑", lambda: _port_up(19388)),
+                ("语音就绪", lambda: _port_up(9881)),
+            ]
+            _n = len(_STAGES)
+            _done = [False] * _n
+            _idx = {"v": 0}                    # 当前阶段
+            _enter = {"t": time.time()}        # 进入当前阶段的时间
+            _deadline = time.time() + 90
+            _pick = {"done": False}            # 启动完成后的默认组合只切一次
+            _selfheal = {"done": False}        # 66% 卡住只自愈一次
+
+            def _draw():
+                _k = _idx["v"]
+                _p = int(100 * _k / _n)
+                if _k < _n:
+                    self._ball_progress(_p, "Fairy 启动中 · " + _STAGES[_k][0], True)
+                else:
+                    self._ball_progress(100, "Fairy 启动完成", True)
+                    # ★ 2026-10-12【启动默认游戏模式】启动完成后自动进入游戏模式
+                    if not _pick["done"]:
+                        _pick["done"] = True
+                        try:
+                            self.after(300, self._boot_pick_game)
+                        except Exception:
+                            pass
+                if _k >= _n or time.time() > _deadline:
+                    self._ball_progress(0, "", False)
+                    # ★ 2026-10-12【启动收尾】无论进度走完还是超时，
+                    #   启动都进入游戏模式（释放全部引擎），避免卡住时永不生效。
+                    if not _pick["done"]:
+                        _pick["done"] = True
+                        try:
+                            self.after(300, self._boot_pick_game)
+                        except Exception:
+                            pass
+                    return False
+                return True
+
+            def _check():
+                """★ 2026-10-12【逐阶段推进】只检查当前阶段；就绪后至少停留 1 秒
+                再进下一阶段 -> 进度条按 0→16→33→50→66→83→100 渐进显示。
+                模型加载阶段未就绪时停在「加载本地模型」等待真正加载完。"""
+                _i = _idx["v"]
+                if _i >= _n:
+                    return
+                # ★ 2026-10-12【66% 自愈】「连接本地大脑」卡住超 8 秒 ->
+                #   播报"模型未能启动"并自动重启本地大脑（只做一次，不反复打扰）
+                #   ★ 2026-10-12：启动阶段精简后「连接本地大脑」是第 1 阶段
+                #   （索引 1），旧值 4 会导致自愈永不触发。
+                if _i == 1 and not _selfheal["done"]:
+                    if time.time() - _enter["t"] >= 8.0 and not _port_up(19388):
+                        _selfheal["done"] = True
+                        try:
+                            self.say("模型未能启动，正在重新启动本地大脑", "warn")
+                            self._bubble("本地大脑未响应，正在自动重启", 5)
+                            self._spawn_host()
+                        except Exception:
+                            pass
+                try:
+                    if _STAGES[_i][1]():
+                        if time.time() - _enter["t"] >= 1.0:
+                            _done[_i] = True
+                            _idx["v"] = _i + 1
+                            _enter["t"] = time.time()
+                            try:
+                                self.after(0, _draw)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                if _draw():
+                    self.after(400, _check)
+
+            _draw()
+            _th.Thread(target=_check, daemon=True).start()
+        except Exception:
+            pass
+
+    def _boot_pick_game(self):
+        """★ 2026-10-12【启动默认游戏模式】Fairy 每次启动先进游戏模式：
+        释放全部引擎和模型（显存全给游戏），语音唤醒/识别等轻功能照常；
+        需要对话时在面板手动切换组合（日常全能/高精度/极速）。"""
+        try:
+            _ai = self._ai_cfg()
+            if (_ai.get("preset") or "") != "game":
+                self._save_ai_cfg({"backend": "off", "model": "", "port": "",
+                                   "preset": "game"})
+            # 释放全部引擎和模型（Strata + llama.cpp + Ollama 进程）
+            self._engine_release()
+        except Exception:
+            pass
+
+    def _stop_port_proc(self, port):
+        """停掉监听指定端口的整个进程树（如 Strata 8080），模型文件保留。"""
+        try:
+            import subprocess as _sp2
+            _out = _sp2.run(["netstat", "-ano"], capture_output=True, text=True,
+                            timeout=10).stdout or ""
+            _pids = set()
+            for _ln in _out.splitlines():
+                if ("127.0.0.1:%d" % port) in _ln and "LISTENING" in _ln:
+                    _p = _ln.split()[-1]
+                    if _p.strip().isdigit():
+                        _pids.add(_p.strip())
+            for _pid in _pids:
+                _sp2.run(["taskkill", "/F", "/T", "/PID", _pid],
+                         capture_output=True, timeout=10,
+                         creationflags=getattr(_sp2, "CREATE_NO_WINDOW", 0))
+            return bool(_pids)
+        except Exception:
+            return False
+
+    def _spawn_host(self):
+        """拉起本地大脑（fairy_host.py，端口 19388）——启动进度 66%
+        「连接本地大脑」卡住时的自动重启（自愈）。"""
+        try:
+            import subprocess as _sp
+            _dir = os.path.dirname(os.path.abspath(__file__))
+            _py = sys.executable or "pythonw"
+            _sp.Popen([_py, os.path.join(_dir, "fairy_host.py")],
+                      cwd=_dir,
+                      creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception:
+            pass
 
     def _on_right(self, e):
         """★ 2026-10-11【右键菜单】圆角浮动面板，与设置面板同风格。"""
@@ -4002,9 +4279,8 @@ class FairyBall(tk.Tk):
         except Exception:
             _running = False
         _items = [("Fairy 控制面板", self._open_panel), None,
-                  (("停止本地模型" if _running else "启动本地模型"),
-                   self._strata_stop if _running else self._strata_start),
-                  ("退出引擎与模型释放", self._engine_release), None,
+                  (("释放全部资源" if _running else "启动本地运算"),
+                   self._engine_release if _running else self._strata_start), None,
                   ("全部退出 Fairy", self._quit_all)]
         _w = 264
         _h = sum(52 if it else 2 for it in _items) + 18
@@ -4033,7 +4309,7 @@ class FairyBall(tk.Tk):
             _b = tk.Button(_wrap, image=_img, bd=0, relief="flat",
                            highlightthickness=0, bg=_bgk,
                            activebackground=_bgk, cursor="hand2",
-                           command=lambda c=cmd: (self._close_menu(), c()))
+                           command=lambda c=cmd: self._menu_click(c))
             _b.image = _img
             _b.bind("<Enter>", lambda _ev, b=_b, n=_img, h=_img_h: b.configure(image=h))
             _b.bind("<Leave>", lambda _ev, b=_b, n=_img, h=_img_h: b.configure(image=n))
@@ -4058,6 +4334,76 @@ class FairyBall(tk.Tk):
             except Exception:
                 pass
             self._menu_win = None
+
+    def _menu_click(self, cmd):
+        """★ 2026-10-12【菜单点击】先关菜单再执行命令；异常落盘 panel_err.log。"""
+        try:
+            self._close_menu()
+        except Exception:
+            pass
+        try:
+            cmd()
+        except Exception as _e:
+            import traceback as _tb
+            try:
+                _h = io.open(r"D:\FAIRY\logs\panel_err.log", "a", encoding="utf-8")
+                _h.write("MENU_CLICK\n%s\n" % _tb.format_exc())
+                _h.close()
+            except Exception:
+                pass
+            try:
+                self._bubble("菜单执行失败：" + str(_e)[:50], 5)
+            except Exception:
+                pass
+
+    def _cleanup_engines(self, _target):
+        """★ 2026-10-12【组合退出清理】切走旧组合 -> 停掉不用的引擎/模型，释放资源。
+
+        _target = 新组合的引擎（strata / ollama / llm / off）：
+        · 不是 strata -> 停 8080 进程树（Strata + 模型，约释放几十 GB 内存）
+        · 不是 llm    -> 停 8085 进程树（视觉 llama.cpp）
+        · 不是 ollama -> 不杀 ollama.exe（语音大脑 ask_brain 依赖它），
+                        只把已加载的模型全部卸载（keep_alive=0）释放显存
+        """
+        _bits = []
+        if _target != "strata":
+            try:
+                if self._stop_port_proc(8080):
+                    _bits.append("Strata")
+            except Exception:
+                pass
+        if _target != "llm":
+            try:
+                if self._stop_port_proc(8085):
+                    _bits.append("视觉引擎")
+            except Exception:
+                pass
+        if _target != "ollama":
+            try:
+                import urllib.request as _ur
+                _r = _ur.urlopen("http://127.0.0.1:11434/api/tags", timeout=3)
+                _j = json.loads(_r.read().decode("utf-8", "replace"))
+                for _m in (_j.get("models") or []):
+                    _mn = _m.get("name") or _m.get("model") or ""
+                    if not _mn:
+                        continue
+                    try:
+                        _req = _ur.Request(
+                            "http://127.0.0.1:11434/api/generate",
+                            data=json.dumps({"model": _mn, "keep_alive": 0})
+                            .encode("utf-8"),
+                            headers={"content-type": "application/json"})
+                        _ur.urlopen(_req, timeout=8).read()
+                        _bits.append(_mn)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if _bits:
+            try:
+                self._bubble("已释放：%s" % "、".join(_bits), 4)
+            except Exception:
+                pass
 
     def _engine_release(self):
         """★ 2026-10-11【退出引擎与模型释放】停止本地引擎，释放显存/内存。"""
@@ -4121,35 +4467,6 @@ class FairyBall(tk.Tk):
         except Exception as _e:
             self._bubble("切换音色失败：%s" % _e, 5)
 
-    def _wakeword_set(self):
-        """设置菜单：保存自定义唤醒词（英文词条，逗号分隔多个，重启 Fairy 生效）。"""
-        import tkinter.simpledialog as _sd
-        _old = ""
-        try:
-            with open(fairy_root.CONFIG, encoding="utf-8") as _f:
-                _j = json.load(_f)
-            _old = "、".join((_j.get("ear") or {}).get("wakewords") or [])
-        except Exception:
-            pass
-        _inp = _sd.askstring(
-            "自定义唤醒词",
-            "英文词条，如 alice；多个用逗号分隔\n（设置后重启 Fairy 生效）",
-            initialvalue=_old, parent=self)
-        if _inp is None:
-            return
-        _words = [w.strip() for w in _inp.replace("，", ",").split(",") if w.strip()]
-        try:
-            with open(fairy_root.CONFIG, encoding="utf-8") as _f:
-                _j = json.load(_f)
-            _j.setdefault("ear", {})["wakewords"] = _words
-            _tmp = fairy_root.CONFIG + ".tmp"
-            with open(_tmp, "w", encoding="utf-8") as _f:
-                json.dump(_j, _f, ensure_ascii=False, indent=2)
-            os.replace(_tmp, fairy_root.CONFIG)
-            self._bubble("已保存唤醒词：%s（重启 Fairy 生效）"
-                         % "、".join(_words or ["（已清空，仅 Fairy）"]), 4)
-        except Exception as _e:
-            self._bubble("保存唤醒词失败：%s" % _e, 5)
 
     def _open_panel(self):
         """★ 2026-10-11【Fairy 控制面板】入口：异常落盘日志。"""
@@ -4158,7 +4475,7 @@ class FairyBall(tk.Tk):
         except Exception as _e:
             import traceback
             try:
-                _h = io.open(fairy_root.log("panel_err.log"), "a", encoding="utf-8")
+                _h = io.open(r"D:\FAIRY\logs\panel_err.log", "a", encoding="utf-8")
                 _h.write("%s\n%s\n" % (_e, traceback.format_exc()))
                 _h.close()
             except Exception:
@@ -4174,7 +4491,7 @@ class FairyBall(tk.Tk):
         win.resizable(False, False)
         # 固定屏幕中央（首次设置 + 窗口显示后再校准一次）
         def _center():
-            _w, _h = 700, 450
+            _w, _h = 860, 600
             _sw = win.winfo_screenwidth()
             _sh = win.winfo_screenheight()
             win.geometry("%dx%d+%d+%d" % (_w, _h,
@@ -4182,38 +4499,27 @@ class FairyBall(tk.Tk):
                                           max(0, (_sh - _h) // 2)))
         _center()
         win.after(120, _center)
-        # —— 顶部标题栏：无系统标题栏，这里给最小化 / 关闭按钮 ——
+        # —— 顶部标题栏：无系统标题栏，这里放关闭/退出按钮 ——
         tbar = tk.Frame(win, bg="#f2f3f5")
         tbar.pack(side="top", fill="x")
-        tk.Label(tbar, text="  Fairy 控制面板", bg="#f2f3f5", fg="#52749b",
-                 font=("SimHei", 13, "bold")).pack(side="left", padx=10, pady=10)
-        _bt_min = _pil_round("—", 44, 34, 10, "#ffffff", "#46536a", True, "#dfe3ea")[0]
-        _bt_min_h = _pil_round("—", 44, 34, 10, "#e4edf6", "#46536a", True, "#cdd9e6")[0]
-        _bm = tk.Button(tbar, image=_bt_min, bd=0, relief="flat",
-                        highlightthickness=0, bg="#f2f3f5", activebackground="#f2f3f5",
-                        cursor="hand2",
-                        command=lambda: (win.withdraw(), None))
-        _bm.image = _bt_min
-        _bm.bind("<Enter>", lambda _ev: _bm.configure(image=_bt_min_h))
-        _bm.bind("<Leave>", lambda _ev: _bm.configure(image=_bt_min))
-        _bm.pack(side="right", padx=(0, 6), pady=6)
-        _bt_x = _pil_round("×", 44, 34, 10, "#ffffff", "#a8625e", True, "#dfe3ea")[0]
-        _bt_x_h = _pil_round("×", 44, 34, 10, "#f4e6e4", "#a8625e", True, "#e0c4c0")[0]
-        _bx = tk.Button(tbar, image=_bt_x, bd=0, relief="flat",
-                        highlightthickness=0, bg="#f2f3f5", activebackground="#f2f3f5",
-                        cursor="hand2", command=win.destroy)
-        _bx.image = _bt_x
-        _bx.bind("<Enter>", lambda _ev: _bx.configure(image=_bt_x_h))
-        _bx.bind("<Leave>", lambda _ev: _bx.configure(image=_bt_x))
-        _bx.pack(side="right", padx=(0, 8), pady=6)
-        # —— 左栏导航 ——
-        nav = tk.Frame(win, bg="#f2f3f5", width=190)
-        nav.pack(side="left", fill="y")
-        nav.pack_propagate(False)
-        tk.Label(nav, text="", bg="#f2f3f5").pack(pady=8)
-        # —— 右栏：长页滚动 ——
+
+        def _tbtn(_txt, _fg, _bg, _bg_h, _cmd):
+            _im = _pil_round(_txt, 86, 30, 10, _bg, _fg, True, "#dfe3ea")[0]
+            _imh = _pil_round(_txt, 86, 30, 10, _bg_h, _fg, True, "#dfe3ea")[0]
+            _b = tk.Button(tbar, image=_im, bd=0, relief="flat",
+                           highlightthickness=0, bg="#f2f3f5", activebackground="#f2f3f5",
+                           cursor="hand2", command=_cmd)
+            _b.image = _im
+            _b.bind("<Enter>", lambda _ev, b=_b, i=_imh: b.configure(image=i))
+            _b.bind("<Leave>", lambda _ev, b=_b, i=_im: b.configure(image=i))
+            return _b
+        _tbtn("退出 Fairy", "#a8625e", "#ffffff", "#f4e6e4", self._quit_all).pack(
+            side="right", padx=(0, 6), pady=8)
+        _tbtn("关闭面板", "#46536a", "#ffffff", "#eef1f6", win.destroy).pack(
+            side="right", padx=(0, 2), pady=8)
+        # —— 右栏（占满）：长页滚动 ——
         body = tk.Frame(win, bg="#ffffff")
-        body.pack(side="left", fill="both", expand=True)
+        body.pack(fill="both", expand=True)
         _cv = tk.Canvas(body, bg="#ffffff", highlightthickness=0)
         _sb = tk.Scrollbar(body, orient="vertical", command=_cv.yview)
         _cv.configure(yscrollcommand=_sb.set)
@@ -4221,6 +4527,10 @@ class FairyBall(tk.Tk):
         _cv.pack(side="left", fill="both", expand=True)
         _inner = tk.Frame(_cv, bg="#ffffff")
         _wid = _cv.create_window((18, 6), window=_inner, anchor="nw")
+        # ★ 2026-10-12【滚动条自动伸缩】展开/收起/内容增长时内层尺寸一变，
+        #   滚动区立即重算 -> 滚动条自己伸长/缩短。
+        _inner.bind("<Configure>", lambda _e: _cv.configure(
+            scrollregion=_cv.bbox("all")))
         # ★ 无标题栏 -> 按住空白区域拖动窗口
         _drag = {"x": 0, "y": 0, "on": False}
 
@@ -4236,7 +4546,7 @@ class FairyBall(tk.Tk):
         def _rel(_e):
             _drag["on"] = False
 
-        for _w in (nav, body, _cv, _inner, tbar):
+        for _w in (body, _cv, _inner, tbar):
             try:
                 _w.bind("<Button-1>", _press)
                 _w.bind("<B1-Motion>", _move)
@@ -4250,18 +4560,19 @@ class FairyBall(tk.Tk):
         _cv.bind("<Configure>", _fit)
 
         def _row(parent, title, items):
-            tk.Label(parent, text=title, bg="#ffffff", fg="#6e7888",
-                     font=("SimHei", 13, "bold")).pack(pady=(12, 5))
+            if title:
+                tk.Label(parent, text=title, bg="#ffffff", fg="#66727f",
+                         font=("SimHei", 12, "bold")).pack(pady=(7, 3))
             r = tk.Frame(parent, bg="#ffffff")
             r.pack(fill="x")
-            _imgs = [(_pil_round(_l, 100, 44, 12, "#ffffff", "#46536a", True)[0], _l, _c)
+            _imgs = [(_pil_round(_l, 100, 34, 10, "#ffffff", "#46536a", True)[0], _l, _c)
                      for _l, _c in items]
             _cur = tk.Frame(r, bg="#ffffff")
             _cur.pack()
             _w = 0
             for _im, _l, _c in _imgs:
-                _bw = _im.width() + 12
-                if _w > 0 and _w + _bw > 440:
+                _bw = _im.width() + 10
+                if _w > 0 and _w + _bw > 520:
                     _cur = tk.Frame(r, bg="#ffffff")
                     _cur.pack()
                     _w = 0
@@ -4269,98 +4580,1192 @@ class FairyBall(tk.Tk):
                                highlightthickness=0, bg="#ffffff",
                                activebackground="#ffffff", cursor="hand2")
                 _b.image = _im
-                _b.pack(side="left", padx=5, pady=4)
+                _b.pack(side="left", padx=4, pady=3)
                 _w += _bw
+
+        def _exp_row(parent, title, build):
+            """★ 2026-10-12【内嵌展开】点击标题行 -> 下方展开内容区，再点收起（替代子窗口）。"""
+            _body = tk.Frame(parent, bg="#f2f5f8")
+            _open = {"v": False}
+            # ★ 2026-10-12【箭头符号修复】▾/▸ 是中文字体没有的字形，PIL 渲染成 ×；
+            #   改用全角 ＋（收起）/ －（展开），所有中文字体都支持。
+            _img_on = _pil_round(title + "  －", 300, 34, 10, "#ffffff", "#5f7ea5", True)[0]
+            _img_off = _pil_round(title + "  ＋", 300, 34, 10, "#ffffff", "#5f7ea5", True)[0]
+
+            def _refresh():
+                try:
+                    _fit(None)   # ★ 2026-10-12：展开/收起后同步内层宽度 + 滚动区
+                    _cv.configure(scrollregion=_cv.bbox("all"))
+                    # ★ 2026-10-12【展开自动定位】展开/收起后把滚动区定位到
+                    #   该项附近，防止内容生成在视口外 -> 看起来"没内容"。
+                    try:
+                        _bb = _cv.bbox("all")
+                        _rh = _bb[3] if _bb else 0
+                        _vh = _cv.winfo_height()
+                        if _rh > _vh:
+                            _top = (_body.winfo_y() - 10) / float(_rh)
+                            _cv.yview_moveto(max(0.0, min(1.0, _top)))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            def _sync_body(_e=None):
+                # ★ 2026-10-12【宽度跟随】父区块宽度一变，灰底展开区立即跟宽，
+                #   内容 pack(anchor=center) 随之重新居中。
+                try:
+                    _body.configure(width=parent.winfo_width())
+                except Exception:
+                    pass
+            parent.bind("<Configure>", _sync_body, add=True)
+
+            def _toggle():
+                """展开/收起。顶层包日志：任何异常都落盘，避免"点击无反应"。"""
+                try:
+                    _open["v"] = not _open["v"]
+                    _b.configure(image=_img_on if _open["v"] else _img_off)
+                    if _open["v"]:
+                        if not _body.winfo_children():
+                            try:
+                                build(_body)
+                            except Exception as _e:
+                                # ★ 2026-10-12【展开诊断】异常既显示在展开区，也落盘
+                                #   panel_err.log，便于定位"展开打不开"。
+                                import traceback as _tb
+                                try:
+                                    _h = io.open(r"D:\FAIRY\logs\panel_err.log",
+                                                 "a", encoding="utf-8")
+                                    _h.write("EXPAND %s\n%s\n" % (
+                                        title, _tb.format_exc()))
+                                    _h.close()
+                                except Exception:
+                                    pass
+                                tk.Label(_body, text="加载失败：" + str(_e)[:50],
+                                         bg="#f2f5f8", fg="#a8625e",
+                                         font=("SimHei", 11)).pack(pady=4)
+                        # ★ 2026-10-12【空白兜底】build 后仍无任何子控件 ->
+                        #   显示占位提示，保证展开区永远不会是一片空白。
+                        if not _body.winfo_children():
+                            tk.Label(_body, text="（此区域暂无内容）",
+                                     bg="#f2f5f8", fg="#97a1ad",
+                                     font=("SimHei", 11)).pack(pady=6)
+                        # ★ 2026-10-12【展开空白修复】Tk pack 的请求高度在
+                        #   build 后可能塌陷为 1px（子控件 reqh 正常但父 frame
+                        #   不汇总）-> 强制按子控件请求高度总和撑开展开区。
+                        try:
+                            _body.update_idletasks()
+                            _total = sum(
+                                _c.winfo_reqheight()
+                                for _c in _body.winfo_children()) + 40
+                            _body.configure(height=_total)
+                            try:
+                                _body.configure(
+                                    width=max(_body.winfo_width(),
+                                              parent.winfo_width()))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    else:
+                        # ★ 2026-10-12【收起清空】仅收起时销毁内容；
+                        #   修复：此前 else 误挂在诊断 try 上，导致每次展开
+                        #   刚 build 完就被清空 -> 展开区永远空白。
+                        for _c in _body.winfo_children():
+                            _c.destroy()
+                        # ★ 2026-10-12【收起高度复位】展开时曾显式撑高 _body，
+                        #   收起时必须把高度重置，否则空白面板残留、收不回去。
+                        try:
+                            _body.configure(height=1)
+                        except Exception:
+                            pass
+                    # ★ 2026-10-12【展开诊断】每次展开/收起记录控件数，便于定位
+                    #   "展开没内容"到底是 build 没跑还是渲染不可见。
+                    try:
+                        _h = io.open(r"D:\FAIRY\logs\panel_err.log",
+                                     "a", encoding="utf-8")
+                        _h.write("EXPAND_OK %s open=%d children=%d bh=%d par=%s\n" % (
+                            title, 1 if _open["v"] else 0,
+                            len(_body.winfo_children()),
+                            _body.winfo_height(), str(_body.master())[:50]))
+                        _h.close()
+                    except Exception:
+                        pass
+                    _refresh()
+                except Exception as _e:
+                    import traceback as _tb
+                    try:
+                        _h = io.open(r"D:\FAIRY\logs\panel_err.log",
+                                     "a", encoding="utf-8")
+                        _h.write("TOGGLE %s\n%s\n" % (title, _tb.format_exc()))
+                        _h.close()
+                    except Exception:
+                        pass
+
+            _b = tk.Button(parent, image=_img_off, command=_toggle, bd=0, relief="flat",
+                           highlightthickness=0, bg="#ffffff", activebackground="#ffffff",
+                           cursor="hand2")
+            _b.image = _img_off
+            _b.pack(pady=(3, 0))
+            # ★ 2026-10-12【位置修复】内容区创建时就 pack 占位（紧跟标题按钮下方），
+            #   展开/收起只控制内容填充与清空，位置不再跑到区块末尾。
+            _body.pack(fill="x", pady=(2, 6))
 
         blocks = {}
 
-        def _block(title, desc):
+        def _block(title, desc=""):
             f = tk.Frame(_inner, bg="#ffffff")
-            tk.Label(f, text=title, bg="#ffffff", fg="#52749b",
-                     font=("SimHei", 20, "bold")).pack(pady=(14, 0))
-            tk.Frame(f, bg="#52749b", height=2).pack(fill="x", pady=(3, 2))
+            _h = tk.Frame(f, bg="#ffffff")
+            _h.pack(fill="x")
+            tk.Frame(_h, bg="#5f7ea5", width=4, height=18).pack(side="left", padx=(8, 6))
+            tk.Label(_h, text=title, bg="#ffffff", fg="#5f7ea5",
+                     font=("SimHei", 17, "bold")).pack(side="left")
+            tk.Frame(f, bg="#e8ecf2", height=1).pack(fill="x", pady=(4, 2))
             f.pack(fill="x")
             blocks[title] = f
             return f
 
-        # 1 常用
-        b1 = _block("常用", "常用功能与免打扰")
-        _row(b1, "日常操作", [("打开助手窗口", self._open_ui),
-                            ("立即听歌识曲", self._songrec_now),
-                            ("截图标注", self._screenshot_anno)])
-        _row(b1, "工作辅助", [("立即审核当前代码", self._wg_review_now),
-                            ("剪贴板历史", self._clip_panel)])
-        _bd = _pil_round(("✓ 免打扰（静音播报）" if getattr(self, "_dnd", False)
-                          else "免打扰（静音播报）"), 300, 44, 12,
-                         "#ffffff", "#46536a", True)[0]
-        _bb = tk.Button(b1, image=_bd, command=self._dnd_toggle, bd=0, relief="flat",
-                        highlightthickness=0, bg="#ffffff", activebackground="#ffffff",
-                        cursor="hand2")
-        _bb.image = _bd
-        _bb.pack(pady=(14, 2))
+        def _mk2(_parent, _maker, _toggle, _pady=(4, 2)):
+            """★ 2026-10-12【两态按钮】点击切换状态并重建文字图片（始终显示当前状态）。"""
+            _b = tk.Button(_parent, bd=0, relief="flat", highlightthickness=0,
+                           bg="#ffffff", activebackground="#ffffff", cursor="hand2")
+
+            def _upd():
+                _img = _maker()
+                _b.config(image=_img)
+                _b.image = _img
+            _b.config(command=lambda: (_toggle(), _upd()))
+            _upd()
+            _b.pack(pady=_pady)
+            return _b
 
         # 2 AI 模型
-        b2 = _block("AI 模型", "引擎 / 模型 / API")
+        b2 = _block("AI 模型")
         _ai = self._ai_cfg()
+        _be = _ai.get("backend") or "strata"
         _m = _ai.get("model") or ""
-        _row(b2, "本地引擎", [("Strata（8080）", lambda: self._save_ai_cfg({"backend": "strata"})),
-                            ("Ollama（11434）", lambda: self._save_ai_cfg({"backend": "ollama"})),
-                            ("视觉模型（8085）", lambda: self._save_ai_cfg({"backend": "llm"})),
-                            ("引擎设置", self._engine_setup_panel)])
-        _row(b2, "本地模型", [("本地模型" + ("（" + _m + "）" if _m else ""), self._ai_set_model),
-                            ("重新探测本机模型", self._ai_probe_now)])
-        _row(b2, "网络引擎", [("DSH 云端内核（DeepSeek）", lambda: self._set_pref("dsh")),
-                            ("自定义接口（OpenAI 兼容）",
-                             lambda: self._save_ai_cfg({"backend": "custom"}))])
-        _row(b2, "网络配置", [("网络模型", self._ai_set_net_model),
-                            ("API Key", self._ai_set_key),
-                            ("接口地址", self._ai_set_url)])
-        _row(b2, "本地运算", [("启动本地运算", self._strata_start),
-                            ("停止本地运算", self._strata_stop)])
+        _pt = _ai.get("port") or ""
+        def _b_engine(f):
+            _bg2 = "#f2f5f8"
+            tk.Label(f, text="引擎类型", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 12, "bold")).pack(anchor="center", pady=(6, 2))
+            _ev = tk.StringVar(value=_be)
+            _PRESET_MODELS = {
+                "strata": ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS",
+                           "Qwen3.8-Flash-Next\u00b7Q4_K_M",
+                           "Qwen3.8-Flash-Next\u00b7Q5_K_M",
+                           "Qwen3.8-Flash-Next\u00b7Q6_K"],
+                "ollama": ["qwen3-30b-a3b", "qwen3.8-27b", "qwen3.5-9b"],
+                "llm": ["Qwen3-VL-8B-Q4_K_M", "Qwen3-VL-4B-Q4_K_M",
+                        "Qwen2.5-VL-7B-Q4_K_M"],
+            }
+            _om_box = {"w": None}
+            _mv = tk.StringVar()
+
+            def _rebuild_pool():
+                """★ 2026-10-12【模型列表兜底】选引擎即重建模型下拉：
+                先渲染【常用模型全集 + 本机磁盘 gguf】（任何引擎/游戏模式都有真实选项），
+                后台线程再探测正在运行的引擎模型并刷新 —— 不再出现"展开没内容"，
+                也不卡主线程（探测/扫盘都在后台）。"""
+                try:
+                    if _om_box["w"] is not None:
+                        try:
+                            _om_box["w"].destroy()
+                        except Exception:
+                            pass
+                    _be2 = _ev.get()
+                    # ① 常用模型全集兜底：所有引擎预设合并，off/游戏模式也有项
+                    _ALL = []
+                    for _v in _PRESET_MODELS.values():
+                        for _x in _v:
+                            if _x not in _ALL:
+                                _ALL.append(_x)
+                    _pool = list(_ALL)
+                    # ② 本机磁盘 gguf（扫描可能慢，放后台，先不阻塞渲染）
+                    def _bg():
+                        _extra = []
+                        try:
+                            import capability as _cap
+                            _mo = _cap.scan_models() or {}
+                            for _f in (_mo.get("gguf_files") or [])[:30]:
+                                _nm = _f.get("name") or ""
+                                if _nm:
+                                    _extra.append(_nm)
+                        except Exception:
+                            pass
+                        try:
+                            _probed = self._ai_probe_models()
+                            _have = [x for _, x in _probed]
+                        except Exception:
+                            _have = []
+                        if not _extra and not _have:
+                            return
+                        def _upd():
+                            try:
+                                # ★ 2026-10-12【销毁防御】后台探测完成时展开区
+                                #   可能已被收起（OptionMenu 已销毁）-> 静默退出，
+                                #   绝不抛 TclError 打断主循环。
+                                if _om_box["w"] is None:
+                                    return
+                                try:
+                                    if not _om_box["w"].winfo_exists():
+                                        return
+                                except Exception:
+                                    return
+                                _pool2 = list(_pool)
+                                for _x in (_extra + _have):
+                                    if _x not in _pool2:
+                                        _pool2.insert(0, _x)
+                                _mv2 = tk.StringVar(value=_mv.get())
+                                _om_box["w"].destroy()
+                                _om_box["w"] = tk.OptionMenu(f, _mv2, *_pool2)
+                                _om_box["w"].configure(
+                                    bg="#ffffff", activebackground="#e4edf6",
+                                    font=("SimHei", 11), highlightthickness=0)
+                                _om_box["w"].pack(anchor="center", pady=3)
+                                _mv.set(_mv2.get())
+                            except Exception:
+                                pass
+                        try:
+                            self.after(0, _upd)
+                        except Exception:
+                            pass
+                    import threading as _th
+                    _th.Thread(target=_bg, daemon=True).start()
+                    # ③ 先用兜底池立即渲染（保证展开就有内容）
+                    if _m and _m not in _pool:
+                        _pool.insert(0, _m)
+                    _pool = _pool or ["（未探测到模型）"]
+                    _mv.set(_m if _m in _pool else _pool[0])
+                    _om_box["w"] = tk.OptionMenu(f, _mv, *_pool)
+                    _om_box["w"].configure(bg="#ffffff", activebackground="#e4edf6",
+                                           font=("SimHei", 11), highlightthickness=0)
+                    _om_box["w"].pack(anchor="center", pady=3)
+                except Exception:
+                    pass
+
+            for _nm, _code in (("Strata（本地运算）", "strata"),
+                               ("Ollama", "ollama"),
+                               ("视觉 llama.cpp", "llm")):
+                tk.Radiobutton(f, text=_nm, value=_code, variable=_ev,
+                               command=lambda: (_pv.set(
+                                   {"strata": "8080", "ollama": "11434",
+                                    "llm": "8085"}.get(_ev.get(), "8080")),
+                                   _rebuild_pool()),
+                               bg=_bg2, fg="#46536a", activebackground=_bg2,
+                               selectcolor=_bg2, font=("SimHei", 12)).pack(anchor="center", pady=1)
+            tk.Label(f, text="模型（下拉：本机探测到的 + 常用预设）", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 12, "bold")).pack(anchor="center", pady=(6, 2))
+            # ★ 2026-10-12【下拉修复】探测结果 + 常用预设兜底，引擎没跑也有下拉可选；
+            #   原 _ai_probe_models 返回值解包方式错误导致展开区"加载失败"。
+            _rebuild_pool()
+            # ★ 2026-10-12【手动输入】引擎没跑时探测不到模型 -> 可直接手填模型名
+            tk.Label(f, text="或手动输入模型名（引擎没跑时用这个）", bg=_bg2, fg="#97a1ad",
+                     font=("SimHei", 10)).pack(anchor="center", pady=(4, 0))
+            _me = tk.StringVar(value="")
+            tk.Entry(f, textvariable=_me, width=24, font=("SimHei", 12)
+                     ).pack(anchor="center", pady=3)
+            tk.Label(f, text="端口（保留默认即可，可自行修改）", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 12, "bold")).pack(anchor="center", pady=(6, 2))
+            _pv = tk.StringVar(value=_pt or {"strata": "8080", "ollama": "11434",
+                                             "llm": "8085"}.get(_be, "8080"))
+            tk.Entry(f, textvariable=_pv, width=12, font=("SimHei", 12)
+                     ).pack(anchor="center", pady=3)
+
+            def _save_eng():
+                _b_ = _ev.get()
+                _m_ = (_me.get().strip() or _mv.get())
+                if not _m_ or _m_.startswith("（"):
+                    _m_ = _m
+                _p_ = _pv.get().strip() or {"strata": "8080", "ollama": "11434",
+                                            "llm": "8085"}.get(_b_, "8080")
+                self._save_ai_cfg({"backend": _b_, "model": _m_, "port": _p_})
+                self._bubble("本地引擎已保存：%s / %s / 端口 %s"
+                             % (_b_, _m_ or "默认", _p_), 4)
+                try:
+                    self.say("本地引擎设置已保存", "ok")
+                except Exception:
+                    pass
+            _r0 = tk.Frame(f, bg=_bg2)
+            _r0.pack(anchor="center", pady=4)
+            self._dlg_btn(_r0, "保存", _save_eng)
+        _exp_row(b2, "引擎 / 模型 / 端口", _b_engine)
+
+        def _b_preset(f):
+            _bg2 = "#f2f5f8"
+            _PRESETS = [
+                ("日常全能", "strata", "8080",
+                 ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS",
+                  "Qwen3.8-Flash-Next\u00b7Q4_K_M",
+                  "Qwen3.8-Flash-Next\u00b7Q5_K_M",
+                  "Qwen3.8-Flash-Next\u00b7Q6_K"],
+                 "Strata 主力：64G 内存甜点位，写代码/日常全能（推荐）"),
+                ("高精度", "ollama", "11434",
+                 ["qwen3-30b-a3b", "qwen3.8-27b", "qwen3.5-9b"],
+                 "又快又强，长推理/疑难问题"),
+                ("极速", "ollama", "11434",
+                 ["qwen3.5-9b", "qwen3.8-27b", "qwen3-30b-a3b"],
+                 "最快，直答/轻任务，显存占用最小"),
+                ("游戏模式", "off", "", [],
+                 "释放全部引擎与模型，显存全给游戏；语音/轻功能照常"),
+            ]
+            _cur_p = (self._ai_cfg().get("preset") or "")
+            _ai_now = self._ai_cfg()
+            _vars = {}
+            _btns = {}
+            _imgs = {}
+
+            def _refresh_all():
+                # ★ 2026-10-12【实时两态】每次刷新实时读配置，点完立即更新 ✓，
+                #   不再等关面板重开。
+                _cur_now = (self._ai_cfg().get("preset") or "")
+                for _i, (_nm, _eng, _pt2, _models, _desc) in enumerate(_PRESETS):
+                    _sel = (_cur_now == _nm) or (_cur_now == "game" and _nm == "游戏模式")
+                    _ck = "✓ " if _sel else "  "
+                    _imgs[_i] = _pil_round(_ck + _nm, 260, 32, 10, "#ffffff",
+                                           "#5f7ea5", True)[0]
+                    _btns[_i].config(image=_imgs[_i])
+                    _btns[_i].image = _imgs[_i]
+
+            def _apply(idx):
+                try:
+                    # ★ 2026-10-12【修复】_apply_impl 是本展开区的嵌套函数，
+                    #   不是 FairyBall 类方法 —— 之前写成 self._apply_impl 必报
+                    #   AttributeError（"'tkinter.tkapp' object has no attribute"）
+                    #   ，导致点组合切换永远失败。
+                    _apply_impl(idx)
+                except Exception as _e:
+                    import traceback as _tb
+                    try:
+                        _h = io.open(r"D:\FAIRY\logs\panel_err.log",
+                                     "a", encoding="utf-8")
+                        _h.write("APPLY\n%s\n" % _tb.format_exc())
+                        _h.close()
+                    except Exception:
+                        pass
+                    try:
+                        self._bubble("组合切换失败：" + str(_e)[:50], 5)
+                    except Exception:
+                        pass
+
+            def _apply_impl(idx):
+                _nm, _eng, _pt2, _models, _desc = _PRESETS[idx]
+                if _eng == "off":
+                    self._engine_release()
+                    self._save_ai_cfg({"preset": "game"})
+                    self._bubble("游戏模式：全部模型已释放，显存已空出，尽情玩吧", 5)
+                    try:
+                        self.say("游戏模式：模型已全部释放，显存已空出，可以开始游戏", "ok")
+                    except Exception:
+                        pass
+                    return
+                _mdl = _vars.get(idx).get() if _vars.get(idx) else _models[0]
+                if not _mdl or _mdl.startswith("（"):
+                    _mdl = _models[0]
+                self._save_ai_cfg({"backend": _eng, "model": _mdl,
+                                   "port": _pt2, "preset": _nm})
+                # ★ 2026-10-12【组合退出清理】先停旧组合的引擎/模型（后台线程），
+                #   再起新组合引擎 —— 切走即释放，不用的模型不再占内存/显存。
+                try:
+                    threading.Thread(target=self._cleanup_engines,
+                                     args=(_eng,), daemon=True).start()
+                except Exception:
+                    pass
+                # ★ 2026-10-12：切换时立即气泡+语音反馈，并弹加载进度
+                self._bubble("正在切换组合：%s（%s）" % (_nm, _mdl), 4)
+                try:
+                    self.say("正在切换组合：%s" % _nm, "doing")
+                except Exception:
+                    pass
+                self._preset_progress(_nm, _pt2)
+
+                def _ensure():
+                    try:
+                        if _eng == "strata":
+                            try:
+                                if (self._strata_probe().get("state") or "") != "running":
+                                    self._strata_start()
+                            except Exception:
+                                pass
+                        elif _eng == "ollama":
+                            import socket as _sk
+                            _s = _sk.socket()
+                            _s.settimeout(0.4)
+                            try:
+                                _s.connect(("127.0.0.1", 11434))
+                                _s.close()
+                                return
+                            except Exception:
+                                pass
+                            try:
+                                import subprocess as _sp2
+                                _exe = os.path.expandvars(
+                                    r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+                                if os.path.exists(_exe):
+                                    _sp2.Popen([_exe, "serve"],
+                                                creationflags=getattr(_sp2, "CREATE_NO_WINDOW", 0),
+                                                stdout=_sp2.DEVNULL, stderr=_sp2.DEVNULL)
+                                    self._bubble("已拉起 Ollama（11434），请稍候", 4)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                threading.Thread(target=_ensure, daemon=True).start()
+                self._bubble("已切换组合：%s（%s）" % (_nm, _mdl), 5)
+                try:
+                    self.say("已切换组合：%s" % _nm, "ok")
+                except Exception:
+                    pass
+                _refresh_all()
+                # ★ 2026-10-15【统一使用】所有引擎组合统一打开 8090 统一对话页
+                #   （对话/监控/关于，中文风格，代理转发到当前引擎，不再分页）。
+                try:
+                    if _eng in ("strata", "ollama", "llm"):
+                        self._open_chat_web(_eng, _pt2, _mdl)
+                except Exception:
+                    pass
+
+            tk.Label(f, text="点组合切换（右侧可先选该组合的模型）",
+                     bg=_bg2, fg="#66727f", font=("SimHei", 11)
+                     ).pack(anchor="center", pady=(2, 4))
+            for _i, (_nm, _eng, _pt2, _models, _desc) in enumerate(_PRESETS):
+                _rowf = tk.Frame(f, bg=_bg2)
+                _rowf.pack(anchor="center", pady=1)
+                _sel = (_cur_p == _nm) or (_cur_p == "game" and _nm == "游戏模式")
+                _ck = "✓ " if _sel else "  "
+                _imgs[_i] = _pil_round(_ck + _nm, 250, 32, 10, "#ffffff",
+                                       "#5f7ea5", True)[0]
+                _b = tk.Button(_rowf, image=_imgs[_i], bd=0, relief="flat",
+                               highlightthickness=0, bg=_bg2, activebackground=_bg2,
+                               cursor="hand2", command=lambda i=_i: _apply(i))
+                _b.image = _imgs[_i]
+                _b.pack(side="left", padx=2)
+                _btns[_i] = _b
+                if _models:
+                    _cur_mdl = _ai_now.get("model") or _models[0]
+                    if _cur_mdl not in _models:
+                        _cur_mdl = _models[0]
+                    _vars[_i] = tk.StringVar(value=_cur_mdl)
+                    tk.OptionMenu(_rowf, _vars[_i], *_models).configure(
+                        bg="#ffffff", activebackground="#e4edf6",
+                        font=("SimHei", 10), highlightthickness=0)
+                tk.Label(f, text="　" + _desc, bg=_bg2, fg="#97a1ad",
+                         font=("SimHei", 10)).pack(anchor="center", pady=(0, 2))
+
+        _exp_row(b2, "组合选择", _b_preset)
+        # ★ 2026-10-12【DSH 可启动】"DSH 云端"按钮：切到 dsh 大脑模式，
+        #   若 DeepSeek Harness（19387）没在跑会自动拉起（见 _set_pref -> _ensure_dsh）
+        _row(b2, "网络配置", [(("✓ DSH 云端" if _be == "dsh" else "DSH 云端"),
+                            lambda: self._set_pref("dsh"))])
+
+        def _b_online(f):
+            """★ 2026-10-12【在线引擎精简】只保留自定义接口（OpenAI 兼容），
+            模型栏带常用预设下拉（自动填模型 + 接口地址）。DSH 云端内核入口保留在上方。"""
+            _bg2 = "#f2f5f8"
+            _ai = self._ai_cfg()
+            _PRESETS = [
+                ("DeepSeek（deepseek-chat）", "deepseek-chat",
+                 "https://api.deepseek.com/v1"),
+                ("DeepSeek 推理（deepseek-reasoner）", "deepseek-reasoner",
+                 "https://api.deepseek.com/v1"),
+                ("智谱 GLM（glm-4-flash 免费）", "glm-4-flash",
+                 "https://open.bigmodel.cn/api/paas/v4"),
+                ("通义千问（qwen-plus）", "qwen-plus",
+                 "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                ("Kimi（moonshot-v1-8k）", "moonshot-v1-8k",
+                 "https://api.moonshot.cn/v1"),
+                ("硅基流动（Qwen2.5-7B）", "Qwen/Qwen2.5-7B-Instruct",
+                 "https://api.siliconflow.cn/v1"),
+                ("OpenAI（gpt-4o-mini）", "gpt-4o-mini",
+                 "https://api.openai.com/v1"),
+            ]
+            _m_var = tk.StringVar(value=_ai.get("model") or "deepseek-chat")
+            _k_var = tk.StringVar(value=_ai.get("api_key") or "")
+            _u_var = tk.StringVar(value=_ai.get("base_url")
+                                  or "https://api.deepseek.com/v1")
+
+            tk.Label(f, text="在线引擎：自定义接口（OpenAI 兼容）",
+                     bg=_bg2, fg="#66727f", font=("SimHei", 10, "bold")
+                     ).pack(anchor="center", pady=(2, 2))
+            tk.Label(f, text="常用服务（选中自动填模型与接口地址）",
+                     bg=_bg2, fg="#97a1ad", font=("SimHei", 10)
+                     ).pack(anchor="center")
+            _cur_nm = _PRESETS[0][0]
+            for _nm, _m, _u in _PRESETS:
+                if _m_var.get() == _m:
+                    _cur_nm = _nm
+                    break
+            _pv2 = tk.StringVar(value=_cur_nm)
+
+            def _on_pre(_sel):
+                for _nm, _m, _u in _PRESETS:
+                    if _sel == _nm:
+                        _m_var.set(_m)
+                        _u_var.set(_u)
+                        break
+            tk.OptionMenu(f, _pv2, *[p[0] for p in _PRESETS],
+                          command=_on_pre).configure(
+                bg="#ffffff", activebackground="#e4edf6", font=("SimHei", 11),
+                highlightthickness=0)
+            tk.Label(f, text="模型（可改）", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 10)).pack(anchor="center", pady=(6, 1))
+            tk.Entry(f, textvariable=_m_var, font=("SimHei", 11),
+                     width=30).pack(anchor="center")
+            tk.Label(f, text="API Key", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 10)).pack(anchor="center", pady=(4, 1))
+            tk.Entry(f, textvariable=_k_var, font=("SimHei", 11),
+                     width=30).pack(anchor="center")
+            tk.Label(f, text="接口地址（选预设自动填，可改）", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 10)).pack(anchor="center", pady=(4, 1))
+            tk.Entry(f, textvariable=_u_var, font=("SimHei", 11),
+                     width=30).pack(anchor="center")
+
+            def _ok():
+                _m = _m_var.get().strip()
+                _k = _k_var.get().strip()
+                _u = _u_var.get().strip()
+                self._save_ai_cfg({"backend": "custom", "model": _m,
+                                   "api_key": _k, "base_url": _u})
+                self._bubble("自定义接口已保存" + ("（%s）" % _m if _m else ""), 3)
+            _r = tk.Frame(f, bg=_bg2)
+            _r.pack(anchor="center", pady=3)
+            self._dlg_btn(_r, "保存", _ok)
+        _exp_row(b2, "自定义接口 / 模型 / Key", _b_online)
+
+        # 1 声音
+        b1 = _block("声音")
+
+        def _b_voice(f):
+            _bg2 = "#f2f5f8"
+            try:
+                import fairy_voice as _fv2
+                _vs2 = _fv2.list_voices() or ["fairy.wav"]
+                _cur2 = _fv2.current()
+            except Exception:
+                _vs2, _cur2 = ["fairy.wav"], ""
+            for _vn in _vs2:
+                _img = _pil_round(("✓ " if _vn == _cur2 else "  ") + _vn, 280, 34, 10,
+                                  "#ffffff", "#46536a", True, "#dfe3ea")[0]
+                _b = tk.Button(f, image=_img, bd=0, relief="flat", highlightthickness=0,
+                               bg=_bg2, activebackground=_bg2, cursor="hand2",
+                               command=(lambda n=_vn: (self._voice_set(n),
+                                                       self._bubble("音色已切换：" + n, 3))))
+                _b.image = _img
+                _b.pack(pady=2)
+
+        def _b_wake(f):
+            _bg2 = "#f2f5f8"
+            _old = ""
+            try:
+                with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                    _old = "、".join((json.load(_f).get("ear") or {}).get("wakewords") or [])
+            except Exception:
+                pass
+            tk.Label(f, text="英文词条，如 alice；多个用逗号分隔（保存后重启 Fairy 生效）",
+                     bg=_bg2, fg="#66727f", font=("SimHei", 10)).pack(anchor="center", pady=(4, 2))
+            _inp = tk.Entry(f, width=28, font=("SimHei", 12))
+            _inp.insert(0, _old)
+            _inp.pack(anchor="center", pady=2)
+
+            def _ok():
+                _words = [w.strip() for w in _inp.get().replace("，", ",").split(",")
+                          if w.strip()]
+                try:
+                    with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                        _j = json.load(_f)
+                    _j.setdefault("ear", {})["wakewords"] = _words
+                    with open(fairy_root.CONFIG, "w", encoding="utf-8") as _f:
+                        json.dump(_j, _f, ensure_ascii=False, indent=2)
+                    self._bubble("已保存唤醒词（重启 Fairy 生效）", 4)
+                except Exception as _e:
+                    self._bubble("保存失败：" + str(_e)[:50], 4)
+            _r = tk.Frame(f, bg=_bg2)
+            _r.pack(anchor="center", pady=3)
+            self._dlg_btn(_r, "保存", _ok)
+
+        _exp_row(b1, "音色", _b_voice)
+        _exp_row(b1, "唤醒词", _b_wake)
+        # 听歌识曲两态（★ 2026-10-12：点击后重建图片刷新文字）
+        def _sr_maker():
+            _on = getattr(self, "_songrec_on", True)
+            return _pil_round(("✓ 听歌识曲（运行中）" if _on else "听歌识曲（已停止）"),
+                              300, 34, 10, "#ffffff", "#46536a", True)[0]
+        _mk2(b1, _sr_maker, self._songrec_toggle)
+        # 免打扰两态（★ 2026-10-12：点击后重建图片刷新文字）
+        def _dnd_maker():
+            _on = getattr(self, "_dnd", False)
+            return _pil_round(("✓ 免打扰（已开启）" if _on else "免打扰（已关闭）"),
+                              300, 34, 10, "#ffffff", "#46536a", True)[0]
+        _mk2(b1, _dnd_maker, self._dnd_toggle, (8, 2))
+        # 天气预警两态（★ 2026-10-12：点击后重建图片刷新文字）
+        def _wa_maker():
+            _wa = True
+            try:
+                with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                    _wa = bool((json.load(_f).get("briefing") or {}).get("weather_alert", True))
+            except Exception:
+                pass
+            return _pil_round(("✓ 天气预警（已开启）" if _wa else "天气预警（已关闭）"),
+                              300, 34, 10, "#ffffff", "#46536a", True)[0]
+        _mk2(b1, _wa_maker, self._alert_toggle)
 
         # 3 视觉识别
-        b3 = _block("视觉识别", "OCR / 取色 / 物体识别")
-        _row(b3, "文字识别", [("截图识别文字（OCR）", self._vision_ocr),
-                            ("区域截图识别", self._vision_ocr_region),
-                            ("常驻屏幕取字", self._overlay_ocr)])
-        _row(b3, "图像与颜色", [("识别物体（YOLO）", self._vision_detect),
-                              ("屏幕取色器", self._color_pick)])
+        b3 = _block("视觉识别")
+        _row(b3, None, [("截图标注", self._screenshot_anno),
+                        ("识别文字 OCR", self._vision_ocr),
+                        ("识别物体 YOLO", self._vision_detect),
+                        ("屏幕取色", self._color_pick)])
 
-        # 4 提醒待办
-        b4 = _block("提醒待办", "定时提醒 / 待办清单")
-        _row(b4, "提醒", [("定时提醒", self._remind_add),
-                         ("待办清单", self._todo_panel)])
+        # 4 网络与设备
+        b4 = _block("网络与设备")
+        _row(b4, None, [("网络诊断", self._net_diag),
+                        ("扫描新设备", self._iot_scan)])
 
-        # 5 网络诊断
-        b5 = _block("网络诊断", "网络检测 / 修复")
-        _row(b5, "诊断", [("网络诊断", self._net_diag)])
+        def _b_iot(f):
+            """★ 2026-10-12【设备列表·内嵌版】滚动列表（已标记/未标记）+
+            未标记行尾「标记」按钮 + 底部起名输入框，不再弹独立窗口。"""
+            _bg2 = "#f2f5f8"
+            # ★ 2026-10-12【居中】设备列表整体居中：包一层容器，_cv2+滚动条
+            #   在容器内左右排布，容器本身锚定中间，不再铺满整个展开区。
+            _wrap2 = tk.Frame(f, bg=_bg2)
+            _wrap2.pack(anchor="center", pady=2)
+            _cv2 = tk.Canvas(_wrap2, bg=_bg2, highlightthickness=0, height=150,
+                             width=640)
+            _sb2 = tk.Scrollbar(_wrap2, orient="vertical", command=_cv2.yview)
+            _cv2.configure(yscrollcommand=_sb2.set)
+            _cv2.pack(side="left", fill="y")
+            _sb2.pack(side="right", fill="y")
+            # ★ 2026-10-12【滚动修复】列表区域滚轮直接滚动（含 Canvas 空白处）；
+            #   滚到边界时透传给外层面板，避免"卡住滚不动"。
+            def _wheel_cv2(_ev):
+                try:
+                    _d = int(-1 * (_ev.delta / 120))
+                    _top, _bot = _cv2.yview()
+                    if (_d > 0 and _top > 0.0) or (_d < 0 and _bot < 1.0):
+                        _cv2.yview_scroll(_d, "units")
+                    else:
+                        try:
+                            _cv.yview_scroll(_d, "units")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            _cv2.bind("<MouseWheel>", _wheel_cv2)
+            _inner2 = tk.Frame(_cv2, bg=_bg2)
+            _wid2 = _cv2.create_window((0, 0), window=_inner2, anchor="nw")
 
-        # 6 设备管理
-        b6 = _block("设备管理", "扫描 / 连接 / 标记")
-        _row(b6, "设备", [("扫描新设备", self._iot_scan),
-                         ("已连接设备", self._iot_devices),
-                         ("标记设备", self._iot_tag)])
+            def _fit2(_e=None):
+                try:
+                    _cv2.itemconfigure(_wid2, width=max(120, _cv2.winfo_width() - 6))
+                    _cv2.configure(scrollregion=_cv2.bbox("all"))
+                except Exception:
+                    pass
+            _cv2.bind("<Configure>", _fit2)
 
-        # 7 设置
-        b7 = _block("设置", "位置 / 权限 / 声音 / 播报")
-        _row(b7, "位置", [("城市选择", self._city_panel),
-                        ("自定义城市", self._set_city_prompt),
-                        ("重新自动定位", lambda: self._set_city(""))])
-        _row(b7, "权限与记忆", [("权限逐项授权", self._perms_panel),
-                              ("全部授权", self._perms_all),
-                              ("记忆统计", self._mem_panel),
-                              ("查看权限说明", self._perms_show)])
-        _row(b7, "声音", [("音色", self._voice_set_ui),
-                         ("唤醒词", self._wakeword_set)])
-        _row(b7, "指令与播报", [("自定义指令", self._custom_cmd_panel),
-                              ("启动播报内容", self._briefing_choose),
-                              ("天气预警（开/关）", self._alert_toggle)])
-        _row(b7, "时段", [("夜间模式", self._night_set)])
-        tk.Label(b7, text="", bg="#ffffff", height=1).pack()
+            def _bind_w2(_w):
+                _w.bind("<MouseWheel>", _wheel_cv2)
+                for _c in _w.winfo_children():
+                    _bind_w2(_c)
+
+            _KCN = {"lan": "局域网", "bt": "蓝牙", "mdns": "组播/投屏",
+                    "serial": "串口", "nearlink": "星闪", "nearby": "近距离"}
+            _devs = {"list": []}
+
+            def _fmt(x):
+                _n = x.get("tag") or x.get("name") or x.get("id") or "?"
+                _t = x.get("type") or ""
+                _v = x.get("vendor") or ""
+                _k = _KCN.get(str(x.get("kind") or x.get("adapter") or ""), "")
+                _ip = str(x.get("ip") or "").strip()
+                _mac = str(x.get("id") or "")
+                for _p in ("ble:", "lan:", "nearlink:", "nearby:", "serial:"):
+                    _mac = _mac.replace(_p, "")
+                _mac = (_mac[-6:] if len(_mac) > 6 else _mac)
+                _bits = [b for b in (_v, _k, _t, _ip, _mac) if b and b != "未知设备"]
+                _s = " · ".join(_bits)
+                return ("%s（%s）" % (_n, _s)) if _s else str(_n)
+
+            def _paint():
+                # ★ 2026-10-12【销毁防御】后台扫描完成回调时，展开区可能已被
+                #   用户收起（_inner2 已销毁）-> 直接静默退出，绝不抛 TclError
+                #   打断 Tk 事件循环（否则面板/球全"没反应"）。
+                try:
+                    if not _inner2.winfo_exists():
+                        return
+                except Exception:
+                    return
+                for _c in _inner2.winfo_children():
+                    _c.destroy()
+                _devs2 = _devs["list"]
+                if not _devs2:
+                    tk.Label(_inner2, text="还没有已连接设备（先去「扫描新设备」）",
+                             bg=_bg2, fg="#66727f",
+                             font=("SimHei", 11)).pack(pady=8)
+                    _bind_w2(_inner2)
+                    return
+                _tagged = [x for x in _devs2 if (x.get("tag") or "").strip()]
+                _untagged = [x for x in _devs2 if not (x.get("tag") or "").strip()]
+                for _title, _items, _can_tag in (
+                        ("已标记", _tagged, False), ("未标记", _untagged, True)):
+                    if not _items:
+                        continue
+                    tk.Label(_inner2, text="%s（%d）" % (_title, len(_items)),
+                             bg=_bg2, fg="#5f7ea5",
+                             font=("SimHei", 11, "bold")).pack(anchor="w", pady=(6, 2))
+                    for _x in _items:
+                        _rowf = tk.Frame(_inner2, bg=_bg2)
+                        _rowf.pack(fill="x", pady=1)
+                        tk.Label(_rowf, text=_fmt(_x), bg=_bg2, fg="#46536a",
+                                 font=("SimHei", 10), width=44,
+                                 anchor="w").pack(side="left", padx=2)
+                        if _can_tag:
+                            _img = _pil_round("标记", 58, 30, 10, "#ffffff",
+                                              "#5f7ea5", True, "#dfe3ea")[0]
+                            _b = tk.Button(_rowf, image=_img, bd=0, relief="flat",
+                                           highlightthickness=0, bg=_bg2,
+                                           activebackground=_bg2, cursor="hand2",
+                                           command=lambda x=_x: _mark(x))
+                            _b.image = _img
+                            _b.pack(side="right", padx=2)
+                _bind_w2(_inner2)
+                _fit2()
+
+            _tag_pending = {"id": None}
+            _hint = tk.Label(f, text="", bg=_bg2, fg="#66727f",
+                             font=("SimHei", 10))
+            _hint.pack(anchor="center", pady=(6, 0))
+            _te = tk.Entry(f, width=24, font=("SimHei", 11))
+            _te.pack(anchor="center", pady=2)
+
+            def _mark(_x):
+                _tag_pending["id"] = str(_x.get("id") or "")
+                _hint.config(text="给「%s」起名：" % (_x.get("name") or _x.get("id")))
+                _te.focus_force()
+
+            def _save_tag():
+                _id = _tag_pending["id"]
+                _nm = _te.get().strip()
+                if not _id or not _nm:
+                    self._bubble("先点未标记设备的「标记」再输入名字", 3)
+                    return
+                try:
+                    _r2 = _rnw([sys.executable,
+                                   os.path.join(self._tools_dir(), "fairy_iot.py"),
+                                   "--tag", _id, _nm, "--json"],
+                               capture_output=True, timeout=30, text=True,
+                               encoding="utf-8")
+                    _d2 = json.loads(_r2.stdout or "{}")
+                    self._bubble(("已标记：%s" % _nm) if _d2.get("ok")
+                                 else ("标记失败：" + str(_d2.get("msg") or "")[:50]), 4)
+                    _hint.config(text="")
+                    _te.delete(0, "end")
+                    _reload()
+                except Exception as _e2:
+                    self._bubble("标记失败：" + str(_e2)[:60], 4)
+            _r5 = tk.Frame(f, bg=_bg2)
+            _r5.pack(anchor="center", pady=3)
+            self._dlg_btn(_r5, "保存标记", _save_tag)
+
+            def _reload():
+                import threading as _th2
+
+                def _work():
+                    try:
+                        _rr = _rnw([sys.executable,
+                                       os.path.join(self._tools_dir(), "fairy_iot.py"),
+                                       "--devices", "--json"], capture_output=True,
+                                      timeout=30, text=True, encoding="utf-8", errors="replace")
+                        _dd = json.loads(_rr.stdout or "{}")
+                        _devs["list"] = _dd.get("devices") or []
+                    except Exception:
+                        _devs["list"] = []
+                    try:
+                        f.after(0, _paint)
+                    except Exception:
+                        pass
+                _th2.Thread(target=_work, daemon=True).start()
+            _reload()
+        _exp_row(b4, "设备列表（分类 / 标记）", _b_iot)
+
+        # 5 设置
+        b5 = _block("设置")
+
+        def _b_pos(f):
+            """★ 2026-10-12【位置·精简】只保留自定义城市输入：请输入城市
+            + 保存 / 取消（点选城市列表已删除）。"""
+            _bg2 = "#f2f5f8"
+            tk.Label(f, text="请输入城市", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 11)).pack(anchor="center", pady=(4, 1))
+            _cv2 = tk.StringVar(value=self.city or "")
+            tk.Entry(f, textvariable=_cv2, width=22, font=("SimHei", 12)
+                     ).pack(anchor="center", pady=3)
+
+            def _save_pos():
+                _c = _cv2.get().strip()
+                if _c:
+                    self._set_city(_c)
+                    self._bubble("位置已设为 %s" % _c, 3)
+                else:
+                    self._bubble("请输入城市名", 3)
+
+            def _cancel_pos():
+                _cv2.set("")
+            _r2 = tk.Frame(f, bg=_bg2)
+            _r2.pack(anchor="center", pady=3)
+            self._dlg_btn(_r2, "保存", _save_pos)
+            self._dlg_btn(_r2, "取消", _cancel_pos)
+
+        def _b_perms(f):
+            _bg2 = "#f2f5f8"
+            try:
+                import fairy_perms as _fp2
+                _au2 = _fp2.authorized()
+            except Exception:
+                _au2 = []
+            _perms_list = [("麦克风", "mic"), ("摄像头", "camera"), ("位置", "location"),
+                           ("剪贴板", "clipboard"), ("截图", "capture"),
+                           ("设备连接", "iot"), ("网络", "network"), ("文件读写", "files")]
+            _vars = {}
+            for _nm, _pid in _perms_list:
+                _v = tk.BooleanVar(value=(_pid in _au2 or "all" in _au2))
+                _vars[_pid] = _v
+                tk.Checkbutton(f, text=_nm, variable=_v, anchor="w", bg=_bg2,
+                               fg="#46536a", activebackground=_bg2, selectcolor=_bg2,
+                               font=("SimHei", 12)).pack(anchor="center", pady=1)
+
+            def _save_perms():
+                try:
+                    import fairy_perms as _fp3
+                except Exception:
+                    return
+                _on = [p for p, v in _vars.items() if v.get()]
+                _fp3.set_perms(_on)
+                self._bubble("已保存 %d 项权限" % len(_on), 3)
+
+            def _all_perms():
+                for _v in _vars.values():
+                    _v.set(True)
+                try:
+                    import fairy_perms as _fp4
+                    _fp4.set_perms(["all"])
+                except Exception:
+                    pass
+                self._bubble("已全部授权", 3)
+            _r3 = tk.Frame(f, bg=_bg2)
+            _r3.pack(anchor="center", pady=3)
+            self._dlg_btn(_r3, "保存", _save_perms)
+            self._dlg_btn(_r3, "全部授权", _all_perms)
+
+        def _b_night(f):
+            _bg2 = "#f2f5f8"
+            _cur = {"night": True, "start": "22:00", "end": "07:00"}
+            try:
+                with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                    _cur.update((json.load(_f).get("dnd") or {}))
+            except Exception:
+                pass
+            _on2 = tk.BooleanVar(value=bool(_cur.get("night", True)))
+            tk.Checkbutton(f, text="开启夜间模式（到点自动静音播报）", variable=_on2,
+                           anchor="w", bg=_bg2, fg="#46536a", activebackground=_bg2,
+                           selectcolor=_bg2, font=("SimHei", 12)).pack(anchor="center", pady=3)
+            tk.Label(f, text="开始时间（如 22:00）", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 11)).pack(anchor="center")
+            _st2 = tk.StringVar(value=_cur.get("start", "22:00"))
+            tk.Entry(f, textvariable=_st2, width=12, font=("SimHei", 12)
+                     ).pack(anchor="center", pady=2)
+            tk.Label(f, text="结束时间（如 07:00）", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 11)).pack(anchor="center")
+            _en2 = tk.StringVar(value=_cur.get("end", "07:00"))
+            tk.Entry(f, textvariable=_en2, width=12, font=("SimHei", 12)
+                     ).pack(anchor="center", pady=2)
+
+            def _save_night():
+                try:
+                    with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                        _j = json.load(_f)
+                    (_j.setdefault("dnd", {}))["night"] = bool(_on2.get())
+                    (_j.setdefault("dnd", {}))["start"] = _st2.get().strip() or "22:00"
+                    (_j.setdefault("dnd", {}))["end"] = _en2.get().strip() or "07:00"
+                    with open(fairy_root.CONFIG, "w", encoding="utf-8") as _f:
+                        json.dump(_j, _f, ensure_ascii=False, indent=2)
+                    self._bubble("夜间模式已保存", 3)
+                except Exception as _e:
+                    self._bubble("保存失败：" + str(_e)[:50], 4)
+            _r4 = tk.Frame(f, bg=_bg2)
+            _r4.pack(anchor="center", pady=3)
+            self._dlg_btn(_r4, "保存", _save_night)
+
+        def _b_clip(f):
+            _bg2 = "#f2f5f8"
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import fairy_clip as _fc2
+                _items2 = _fc2.list_items()
+            except Exception:
+                _items2 = []
+            if not _items2:
+                tk.Label(f, text="还没有剪贴板历史（复制过内容后自动记录）",
+                         bg=_bg2, fg="#97a1ad", font=("SimHei", 11)).pack(anchor="center", pady=4)
+                return
+            _box = tk.Listbox(f, width=52, height=6, font=("SimHei", 11),
+                              bg="#ffffff", fg="#46536a", relief="flat",
+                              highlightthickness=1, highlightbackground="#d5d9e3")
+            _box.pack(anchor="center", pady=3)
+            for i, x in enumerate(_items2[:15]):
+                _box.insert("end", "[%d] %s %s" % (i, x["time"], x["text"][:50]))
+            _r1 = tk.Frame(f, bg=_bg2)
+            _r1.pack(anchor="center", pady=2)
+            tk.Label(_r1, text="输入编号复制：", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 11)).pack(side="left")
+            _idx = tk.Entry(_r1, width=6, font=("SimHei", 12))
+            _idx.pack(side="left", padx=6)
+
+            def _ok2():
+                _n = _idx.get().strip()
+                if not _n.isdigit():
+                    self._bubble("输入数字编号", 3)
+                    return
+                n = int(_n)
+                t = _fc2.get(n)
+                if t is None:
+                    self._bubble("没有这条（编号 0-%d）" % (len(_items2) - 1), 4)
+                    return
+                try:
+                    _rnw(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $input"],
+                         input=t, text=True, capture_output=True, timeout=10, encoding="utf-8", errors="replace")
+                    self._bubble("已复制：" + t[:120], 5)
+                except Exception as _e2:
+                    self._bubble("复制失败：" + str(_e2)[:50], 4)
+            self._dlg_btn(_r1, "复制", _ok2)
+
+        def _b_remind(f):
+            _bg2 = "#f2f5f8"
+            tk.Label(f, text="多久后提醒（分钟）？", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 11)).pack(anchor="center", pady=(4, 2))
+            _mins = tk.Entry(f, width=10, font=("SimHei", 12))
+            _mins.insert(0, "10")
+            _mins.pack(anchor="center", pady=2)
+            tk.Label(f, text="提醒内容", bg=_bg2, fg="#66727f",
+                     font=("SimHei", 11)).pack(anchor="center", pady=(4, 2))
+            _msg = tk.Entry(f, width=30, font=("SimHei", 12))
+            _msg.insert(0, "到时间了")
+            _msg.pack(anchor="center", pady=2)
+
+            def _ok3():
+                try:
+                    mins = float(_mins.get().strip())
+                except ValueError:
+                    self._bubble("分钟数不对", 3)
+                    return
+                t = _msg.get().strip() or "到时间了"
+                self._reminders.append((time.time() + mins * 60, t))
+                self.say("好的，%g 分钟后提醒你" % mins, "ok")
+                self._bubble("已设提醒：%g 分钟后「%s」" % (mins, t), 4)
+            _r = tk.Frame(f, bg=_bg2)
+            _r.pack(anchor="center", pady=3)
+            self._dlg_btn(_r, "确定", _ok3)
+
+        def _b_todo(f):
+            _bg2 = "#f2f5f8"
+            _box = tk.Listbox(f, width=48, height=5, font=("SimHei", 11),
+                              bg="#ffffff", fg="#46536a", relief="flat",
+                              highlightthickness=1, highlightbackground="#d5d9e3")
+            _box.pack(anchor="center", pady=3)
+
+            def _refresh2():
+                _box.delete(0, "end")
+                try:
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_todo as _ft2
+                    for i, x in enumerate(_ft2.list_items()):
+                        _box.insert("end", "[%d] %s%s %s%s" % (
+                            i, "完成" if x.get("done") else "待办", "  " + x["text"],
+                            " @" + x["at"] if x.get("at") else "",
+                            "  ←已到期" if (x.get("at") and x["at"] <= time.strftime("%H:%M")
+                                           and not x.get("done")) else ""))
+                except Exception:
+                    pass
+            _refresh2()
+            _ent = tk.Entry(f, width=48, font=("SimHei", 12))
+            _ent.pack(anchor="center", pady=2)
+            tk.Label(f, text="添加：内容|时间（如 交报告|14:30，时间可省）", bg=_bg2,
+                     fg="#97a1ad", font=("SimHei", 10)).pack(anchor="center")
+
+            def _add2():
+                t = _ent.get().strip()
+                if not t:
+                    return
+                at = ""
+                if "|" in t:
+                    t, at = t.split("|", 1)
+                try:
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_todo as _ft3
+                    _ft3.add(t.strip(), at.strip())
+                    self.say("已添加待办" + ("" if not at else "，" + at.strip() + " 提醒"), "ok")
+                except Exception:
+                    pass
+                _ent.delete(0, "end")
+                _refresh2()
+
+            def _done2():
+                try:
+                    s = _box.get("active").split("]")[0].strip("[").strip()
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_todo as _ft4
+                    _ft4.done(int(s))
+                except Exception:
+                    pass
+                _refresh2()
+
+            def _del2():
+                try:
+                    s = _box.get("active").split("]")[0].strip("[").strip()
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_todo as _ft5
+                    _ft5.delete(int(s))
+                except Exception:
+                    pass
+                _refresh2()
+            _r = tk.Frame(f, bg=_bg2)
+            _r.pack(anchor="center", pady=3)
+            self._dlg_btn(_r, "添加", _add2)
+            self._dlg_btn(_r, "完成（选中）", _done2)
+            self._dlg_btn(_r, "删除（选中）", _del2, danger=True)
+
+        _exp_row(b5, "剪贴板历史", _b_clip)
+        _exp_row(b5, "定时提醒", _b_remind)
+        _exp_row(b5, "待办清单", _b_todo)
+        _exp_row(b5, "位置", _b_pos)
+        _exp_row(b5, "权限授权", _b_perms)
+        _row(b5, "记忆与说明", [("记忆统计", self._mem_panel),
+                              ("权限说明", self._perms_show)])
+
+        def _b_brief(f):
+            _bg2 = "#f2f5f8"
+            _items = [("time", "时间问候"), ("location", "当前位置"), ("weather", "天气"),
+                      ("dress", "穿衣建议"), ("news", "新闻"), ("status", "服务状态"),
+                      ("devices", "已连接设备数"), ("holiday", "今日节日/节气"),
+                      ("todo", "今日待办"), ("network", "网络状态"), ("api_balance", "API 余额")]
+            cur = {}
+            try:
+                with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                    _j = json.load(_f)
+                cur = _j.get("briefing") or {}
+            except Exception:
+                pass
+            _vs = {}
+            for _k, _nm in _items:
+                _v = tk.BooleanVar(value=cur.get(_k, True))
+                _vs[_k] = _v
+                tk.Checkbutton(f, text=_nm, variable=_v, anchor="w", bg=_bg2,
+                               fg="#46536a", activebackground=_bg2, selectcolor=_bg2,
+                               font=("SimHei", 11)).pack(anchor="center", pady=1)
+
+            def _save():
+                _new = {_k: bool(_v.get()) for _k, _v in _vs.items()}
+                try:
+                    with open(fairy_root.CONFIG, encoding="utf-8") as _f:
+                        _j = json.load(_f)
+                    _j["briefing"] = _new
+                    with open(fairy_root.CONFIG, "w", encoding="utf-8") as _f:
+                        json.dump(_j, _f, ensure_ascii=False, indent=2)
+                    self.say("启动播报内容已更新", "ok")
+                    self._bubble("已保存，下次启动生效", 4)
+                except Exception as _e:
+                    self._bubble("保存失败：" + str(_e)[:60], 4)
+            _r = tk.Frame(f, bg=_bg2)
+            _r.pack(anchor="center", pady=3)
+            self._dlg_btn(_r, "保存（下次启动生效）", _save)
+
+        def _b_cmd(f):
+            _bg2 = "#f2f5f8"
+            _box = tk.Listbox(f, width=56, height=5, font=("SimHei", 11),
+                              bg="#ffffff", fg="#46536a", relief="flat",
+                              highlightthickness=1, highlightbackground="#d5d9e3")
+            _box.pack(anchor="center", pady=3)
+
+            def _refresh3():
+                _box.delete(0, "end")
+                try:
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_custom_cmd as _fcc
+                    for i, c in enumerate(_fcc._load()):
+                        _box.insert("end", "[%d] %s → %s: %s" % (
+                            i, c.get("trigger"), c.get("type"), c.get("target")))
+                except Exception:
+                    pass
+            _refresh3()
+            _f1 = tk.Frame(f, bg=_bg2)
+            _f1.pack(anchor="center", pady=2)
+            tk.Label(_f1, text="说：", bg=_bg2, fg="#46536a",
+                     font=("SimHei", 11)).pack(side="left")
+            _e1 = tk.Entry(_f1, width=12, font=("SimHei", 11))
+            _e1.pack(side="left", padx=(0, 8))
+            tk.Label(_f1, text="做：", bg=_bg2, fg="#46536a",
+                     font=("SimHei", 11)).pack(side="left")
+            _e2 = tk.Entry(_f1, width=22, font=("SimHei", 11))
+            _e2.pack(side="left")
+            _v = tk.StringVar(value="say")
+            _f2 = tk.Frame(f, bg=_bg2)
+            _f2.pack(anchor="center", pady=2)
+            for _k, _nm in (("app", "打开软件"), ("url", "打开网页"),
+                            ("say", "回复一句"), ("cmd", "运行命令")):
+                tk.Radiobutton(_f2, text=_nm, variable=_v, value=_k, bg=_bg2,
+                               fg="#46536a", activebackground=_bg2, selectcolor=_bg2,
+                               font=("SimHei", 10)).pack(side="left", padx=3)
+
+            def _add3():
+                tr = _e1.get().strip()
+                tg = _e2.get().strip()
+                if not tr or not tg:
+                    return
+                try:
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_custom_cmd as _fcc2
+                    _fcc2.add(tr, _v.get(), tg)
+                    self.say("已添加自定义指令", "ok")
+                except Exception:
+                    pass
+                _e1.delete(0, "end")
+                _e2.delete(0, "end")
+                _refresh3()
+
+            def _del3():
+                try:
+                    s = _box.get("active").split("]")[0].strip("[").strip()
+                    sys.path.insert(0, self._tools_dir())
+                    import fairy_custom_cmd as _fcc3
+                    _fcc3.remove(int(s))
+                except Exception:
+                    pass
+                _refresh3()
+            _r = tk.Frame(f, bg=_bg2)
+            _r.pack(anchor="center", pady=3)
+            self._dlg_btn(_r, "添加", _add3)
+            self._dlg_btn(_r, "删除（选中）", _del3, danger=True)
+            tk.Label(f, text="例：说「查快递」→ 打开「拼多多」；说「网怎么了」→ 运行「网络诊断」",
+                     bg=_bg2, fg="#97a1ad", font=("SimHei", 10)).pack(anchor="center", pady=(4, 0))
+
+        _exp_row(b5, "自定义指令", _b_cmd)
+        _exp_row(b5, "启动播报内容", _b_brief)
+        _exp_row(b5, "夜间模式", _b_night)
+        tk.Label(b5, text="", bg="#ffffff", height=1).pack()
+
+
+
 
         _cv.update_idletasks()
         _cv.configure(scrollregion=_cv.bbox("all"))
         win.after(250, lambda: (_cv.update_idletasks(),
+                                _cv.configure(scrollregion=_cv.bbox("all"))))
+        # ★ 2026-10-12【宽度/滚动区加固】构建完立刻刷新内层宽度与滚动区，
+        #   再在 400ms 后补一次 —— 避免 Canvas 首帧宽度为 0 时展开区宽度
+        #   被卡成最小值的"灰条不铺满、内容不居中"问题。
+        try:
+            _fit(None)
+        except Exception:
+            pass
+        win.after(400, lambda: (_fit(None), _cv.update_idletasks(),
                                 _cv.configure(scrollregion=_cv.bbox("all"))))
 
         # 滚轮绑定到右侧所有子控件
@@ -4371,56 +5776,6 @@ class FairyBall(tk.Tk):
                 _bind_wheel(_c)
         _bind_wheel(_inner)
 
-        # 左栏圆角导航：点击滚动跳转（选中/未选中两态图）
-        _NAV = [("常用", "常用功能与免打扰"), ("AI 模型", "引擎 / 模型 / API"),
-                ("视觉识别", "OCR / 取色 / 物体识别"), ("提醒待办", "定时提醒 / 待办清单"),
-                ("网络诊断", "网络检测 / 修复"), ("设备管理", "扫描 / 连接 / 标记"),
-                ("设置", "位置 / 权限 / 声音 / 播报")]
-        _btns = {}
-
-        def _jump(_nm):
-            _cv.update_idletasks()
-            try:
-                # ★ 2026-10-12：先强制刷新 scrollregion，再算目标位置，
-                #   否则首次点导航（滚动区还没量好）时 yview_moveto 比例算错，
-                #   表现为「点了设置/后面的区块，内容滚不到位/不显示」。
-                _cv.configure(scrollregion=_cv.bbox("all"))
-                _y = blocks[_nm].winfo_y()
-                _bb = _cv.bbox("all") or (0, 0, 0, 0)
-                _h = _bb[3] or 1
-                _vis = max(1, _cv.winfo_height())
-                # 让区块标题对齐可视区上沿（留 6px 边距），并夹在 [0,1]
-                _to = max(0.0, min(1.0, (_y - 6) / max(1.0, _h - _vis)))
-                _cv.yview_moveto(_to)
-            except Exception:
-                pass
-            for _k, (_lb, _n, _s) in _btns.items():
-                _lb.configure(image=_s if _k == _nm else _n)
-
-        for _nm, _desc in _NAV:
-            _n = _pil_round(_nm, 158, 40, 12, "#f2f3f5", "#5c6572", False, "#dfe3ea")[0]
-            _s = _pil_round(_nm, 158, 48, 12, "#e4edf6", "#52749b", True, "#cdd9e6")[0]
-            _lb = tk.Label(nav, image=_n, bg="#f2f3f5", cursor="hand2")
-            _lb.image = _n
-            _lb.pack(pady=3)
-            _lb.bind("<Button-1>", lambda _e, n=_nm: _jump(n))
-            _btns[_nm] = (_lb, _n, _s)
-        tk.Label(nav, text="", bg="#f2f3f5").pack(fill="x", expand=True)
-        _row2 = tk.Frame(nav, bg="#f2f3f5")
-        _row2.pack(fill="x", padx=14, pady=10)
-        _bc = _pil_round("关闭面板", 74, 44, 12, "#ffffff", "#46536a", True, "#dfe3ea")[0]
-        _bt = tk.Button(_row2, image=_bc, command=win.destroy, bd=0, relief="flat",
-                        highlightthickness=0, bg="#f2f3f5", activebackground="#f2f3f5",
-                        cursor="hand2")
-        _bt.image = _bc
-        _bt.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        _be = _pil_round("退出 Fairy", 74, 44, 12, "#ffffff", "#a8625e", True,
-                         "#dfe3ea")[0]
-        _bq = tk.Button(_row2, image=_be, command=self._quit_all, bd=0, relief="flat",
-                        highlightthickness=0, bg="#f2f3f5", activebackground="#f2f3f5",
-                        cursor="hand2")
-        _bq.image = _be
-        _bq.pack(side="left", expand=True, fill="x", padx=(4, 0))
         # Esc 关闭面板（任意焦点都生效；面板销毁后自动失效）
         def _esc(_e):
             try:
@@ -4429,38 +5784,11 @@ class FairyBall(tk.Tk):
             except Exception:
                 pass
         win.bind_all("<Escape>", _esc)
-        _jump("常用")
 
-    def _perms_panel(self):
-        """★ 2026-10-11【权限逐项授权】弹窗：勾选/取消后保存。"""
-        try:
-            import fairy_perms as _fp
-        except Exception:
-            self._bubble("权限模块不可用", 4)
-            return
-        _au = set(_fp.authorized())
-        win = tk.Toplevel(self)
-        win.title("权限授权")
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_screenwidth() // 2 - 170,
-                                 self.winfo_screenheight() // 2 - 150))
-        _vs = {}
-        for _pid, _nm, _use, _no in _fp.PERMS:
-            _v = tk.BooleanVar(value=_pid in _au)
-            _vs[_pid] = _v
-            tk.Checkbutton(win, text=_nm, variable=_v, anchor="w",
-                           font=("SimHei", 12)).pack(fill="x", padx=16, pady=2)
 
-        def _save():
-            _on = [p for p, v in _vs.items() if v.get()]
-            _fp.set_perms(_on)
-            self._bubble("权限已更新：%d 项" % len(_on), 3)
-            win.destroy()
-        tk.Button(win, text="保存", command=_save, font=("SimHei", 12)
-                  ).pack(pady=8)
 
     def _voice_set_ui(self):
-        """★ 2026-10-11【音色选择】弹窗：列出全部音色，点击即切换。"""
+        """★ 2026-10-11【音色选择】统一风格弹窗：列出全部音色，点击即切换。"""
         try:
             import fairy_voice as _fv
         except Exception:
@@ -4468,54 +5796,64 @@ class FairyBall(tk.Tk):
             return
         _vs = _fv.list_voices() or ["fairy.wav"]
         _cur = _fv.current()
-        win = tk.Toplevel(self)
-        win.title("选择音色")
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_screenwidth() // 2 - 140,
-                                 self.winfo_screenheight() // 2 - 140))
+        win, wrap = self._dialog("选择音色", 360, 360)
         for _vn in _vs:
-            tk.Button(win, text=("✓ " if _vn == _cur else "  ") + _vn,
-                      command=(lambda n=_vn: (self._voice_set(n), win.destroy())),
-                      font=("SimHei", 12), width=26, anchor="w",
-                      bg="#ffffff", relief="flat", bd=1,
-                      highlightthickness=1, highlightbackground="#d5d9e3"
-                      ).pack(padx=14, pady=3)
+            _img = _pil_round(("✓ " if _vn == _cur else "  ") + _vn, 300, 42, 12,
+                              "#ffffff", "#46536a", True, "#dfe3ea")[0]
+            _b = tk.Button(wrap, image=_img, bd=0, relief="flat",
+                           highlightthickness=0, bg="#f2f3f5",
+                           activebackground="#f2f3f5", cursor="hand2",
+                           command=(lambda n=_vn: (self._voice_set(n), win.destroy())))
+            _b.image = _img
+            _b.pack(pady=3)
 
-    def _city_panel(self):
-        """★ 2026-10-11【城市选择】弹窗：内置城市列表点击即切换。"""
-        win = tk.Toplevel(self)
-        win.title("选择城市")
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_screenwidth() // 2 - 140,
-                                 self.winfo_screenheight() // 2 - 200))
-        _box = tk.Listbox(win, width=24, height=14, font=("SimHei", 12))
-        _box.pack(padx=10, pady=6)
-        for _c in CITIES:
-            _box.insert("end", _c)
 
-        def _pick():
-            try:
-                _c = _box.get("active")
-                self._set_city(_c)
-                win.destroy()
-            except Exception:
-                pass
-        tk.Button(win, text="选中并切换", command=_pick, font=("SimHei", 12)
-                  ).pack(pady=(0, 8))
 
     def _open_ui(self):
-        """打开【助手窗口】：右键菜单入口。
-
-        ★ 2026-10-10修复三件事：
-          ① `LOG` 从未定义（fairy_root 里叫 LOGS，复数）-> NameError 被下面的
-             except 吞掉 -> 代理【永远拉不起来】，然后照样 webbrowser.open ->
-             会看到"无法连接"的空白页。
-          ② 拉起后必须【确认 8081 真的通了】才开浏览器；没通就不开，改用气泡提示。
-          ③ 探活最长要等 5 秒 —— 主线程是 33fps 的 _tick 循环，卡主线程 = 动画冻住，
-             所以整段放后台线程跑（Tk 在这段里一次都不碰）。
-        """
+        """★ 2026-10-12【打开Strata对话】右键菜单入口。
+        Strata（8080）没跑就先用本地运算启动，再打开它的对话页。"""
         threading.Thread(target=self._open_ui_job, daemon=True,
                          name="fairy-openui").start()
+
+    def _open_chat_web(self, engine="ollama", port=11434, model=""):
+        """★ 2026-10-12【统一网页对话】Ollama/llm 组合切换后打开的对话页。
+        起 8090 代理服务（幂等）-> 浏览器打开带参对话页，样式对齐 Strata。"""
+        threading.Thread(target=self._open_chat_web_job,
+                         args=(engine, port, model), daemon=True,
+                         name="fairy-chatweb").start()
+
+    def _open_chat_web_job(self, engine, port, model):
+        import subprocess as _sp
+        import webbrowser as _wb
+        from urllib.parse import quote
+        try:
+            if not self._probe_port(8090, timeout=0.8):
+                _exe = sys.executable.replace("python.exe", "pythonw.exe")
+                _script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "fairy_chat.py")
+                try:
+                    _sp.Popen([_exe, _script],
+                              creationflags=0x08000000,
+                              stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                except Exception:
+                    _sp.Popen([sys.executable, _script],
+                              creationflags=0x08000000,
+                              stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                for _ in range(15):
+                    time.sleep(0.4)
+                    if self._probe_port(8090, timeout=0.8):
+                        break
+            if self._probe_port(8090, timeout=0.8):
+                _url = ("http://127.0.0.1:8090/?engine=%s&port=%d&model=%s"
+                        % (quote(engine), int(port), quote(model or "")))
+                try:
+                    _wb.open(_url)
+                except Exception as _e2:
+                    self._ui_bubble("打开浏览器失败：" + str(_e2)[:40])
+            else:
+                self._ui_bubble("对话页 8090 启动失败，请查看 logs\\fairy_chat.log")
+        except Exception as _e:
+            self._ui_bubble("打开对话页失败：" + str(_e)[:40])
 
     def _probe_port(self, port, timeout=0.6):
         """探一个本地端口通不通。返回 True/False。"""
@@ -4535,55 +5873,25 @@ class FairyBall(tk.Tk):
             pass
 
     def _open_ui_job(self):
-        """_open_ui 的实际工作（后台线程）：探活 -> 没起就拉起 -> 再探 -> 通了才开浏览器。"""
-        import subprocess as _sp          # ★ 局部 import：文件头没带 subprocess/webbrowser
-        import webbrowser as _wb
-        port = 8081
-        url = "http://127.0.0.1:%d/" % port
+        """_open_ui 的实际工作（后台线程）：Strata 没跑先启动 -> 通了再开 8090 统一对话页。"""
+        port = 8080
         alive = self._probe_port(port)
         if not alive:
-            _dir = os.path.dirname(os.path.abspath(__file__))
-            _script = os.path.join(_dir, "fairy_ui.py")
-            if not os.path.exists(_script):
-                print("[fairy] 找不到 fairy_ui.py（%s），不打开浏览器" % _script, flush=True)
-                self._ui_bubble("找不到助手窗口程序，没打开浏览器。")
+            # Strata 没跑：先启动本地运算
+            if getattr(self, "_strata_busy", False):
+                self._ui_bubble("上一个操作还在进行，稍后再试。")
                 return
-            # ★ 日志路径：LOG（没定义）-> fairy_root.LOGS（<FAIRY_ROOT>\logs）。
-            #   顺便把解析出来的路径打出来 —— 出问题能一眼看出写哪去了。
-            _logp = os.path.join(fairy_root.LOGS, "fairy_ui.log")
-            try:
-                os.makedirs(os.path.dirname(_logp), exist_ok=True)
-                print("[fairy] 助手窗口日志：%s" % _logp, flush=True)
-                _lf = open(_logp, "a", encoding="utf-8", errors="replace")
-                try:
-                    _sp.Popen(
-                        [sys.executable, _script, "--no-open"],
-                        cwd=_dir, stdout=_lf, stderr=_sp.STDOUT, stdin=_sp.DEVNULL,
-                        creationflags=0x00000008 | 0x00000200 | 0x08000000,
-                        close_fds=True)
-                finally:
-                    _lf.close()          # 句柄已复制给子进程，父进程这份要关掉
-                print("[fairy] 已拉起助手窗口代理（fairy_ui.py，%s）" % _script, flush=True)
-            except Exception as _e:
-                print("[fairy] 拉起代理失败：%s" % _e, flush=True)
-                self._ui_bubble("助手窗口没起来，暂时别开浏览器。")
-                return
-            # ★ 轮询等它真的监听 8081（最多 5 秒），别用固定 sleep 赌
-            for _i in range(10):
-                time.sleep(0.5)
+            self._strata_start()
+            for _ in range(40):
+                time.sleep(3)
                 if self._probe_port(port):
-                    alive = True
-                    print("[fairy] 助手窗口代理已就绪（%.1fs）" % (0.5 * (_i + 1)), flush=True)
                     break
-            if not alive:
-                print("[fairy] 代理拉起后 5 秒仍没监听 %s -> 不打开浏览器" % port, flush=True)
-                self._ui_bubble("助手窗口没起来（端口没通），没打开浏览器。")
-                return
-        try:
-            _wb.open(url)
-            print("[fairy] 已打开：" + url, flush=True)
-        except Exception as _e:
-            print("[fairy] 打开浏览器失败：%s" % _e, flush=True)
+        if self._probe_port(port):
+            # ★ 2026-10-15【统一使用】Strata 也统一打开 8090 对话页（代理到 strata），
+            #   不再开 Strata 原生 8080 页；8090 由 _open_chat_web 幂等拉起。
+            self._open_chat_web("strata", 8080, "")
+        else:
+            self._ui_bubble("Strata 还没就绪（加载模型约 1~2 分钟），稍后右键再开。")
 
     def _quit_all(self):
         """右键：全部退出 —— 球 + 守护 + 本地服务 + 语音 + 本地运算，一次收干净。
@@ -4598,6 +5906,7 @@ class FairyBall(tk.Tk):
             import tkinter.messagebox as _mb
             if not _mb.askyesno("Fairy", "要全部退出吗？\n\n"
                                           "球 / 守护 / 本地服务 / 语音 / 本地运算都会关掉。\n"
+                                          "DSH 也会一起关掉。\n"
                                           "（想只关球就选上面那条「退出 Fairy 球」）"):
                 return
         except Exception:
@@ -4719,6 +6028,8 @@ class FairyBall(tk.Tk):
             _parts.append(doing)
         elif running:
             _parts.append("正在执行")
+        else:
+            _parts.append("待机")
         if steps and steps > 0:
             _parts.append("第 %d 步" % steps)
         if low:
@@ -4768,8 +6079,9 @@ class FairyBall(tk.Tk):
         else:
             fw = max(3, int(bw * max(0.0, min(100.0, float(prog))) / 100.0))
             _bar_rect(x0, ty, x0 + fw, ty + 12, 6, col, _PANEL_FUSE_FILL)
-        # 百分比（右边，大字）
-        pct_txt = "…" if prog is None else ("%d%%" % int(prog))
+        # 百分比（右边，大字）；待机不显示进度时用 "--"（不显示"…"）
+        pct_txt = "--" if (prog is None and not running) else (
+            "…" if prog is None else ("%d%%" % int(prog)))
         try:
             tw = d.textlength(pct_txt, font=self.f_big)
         except Exception:
@@ -4846,6 +6158,11 @@ class FairyBall(tk.Tk):
                 crem = self.state.crem
                 doing = self.state.doing
                 mode = self.state.mode
+            # ★ 2026-10-12【临时进度优先】启动/组合切换/扫描设备等临时进度
+            #   画在球右侧进度条面板（_ball_progress 设置），显示完自动回到宿主状态。
+            _tp = getattr(self, "_temp_prog", None)
+            if _tp:
+                running, prog, doing = True, _tp[0], _tp[1]
             # 侧向：变了就把窗口挪一下，让球在屏幕上原地不动
             side = self._pick_side()
             if side != self.side:
@@ -4872,9 +6189,12 @@ class FairyBall(tk.Tk):
             self._maybe_brief()
             low_token = isinstance(cpct, (int, float)) and cpct >= 85
             _lt = getattr(self, "_local_task", None)
-            if running is True or low_token or _lt:
+            # ★ 2026-10-12【硬件状态常驻】不再只在任务时画面板：
+            #   待机也一直显示内存/显存/CPU 三条硬件条（标题显示"待机"）。
+            #   任务/临时进度/额度告警照常优先显示。
+            if True:
                 try:
-                    self._draw_bar(img, ball_x, True if _lt else running, prog, cpct, doing, crem, self.balance, mode,
+                    self._draw_bar(img, ball_x, running, prog, cpct, doing, crem, self.balance, mode,
                                _lt or self.state.task_label, self.state.steps)
                 except Exception as _e_bar:
                     # 进度条画失败【绝不能拖垮球体】：只记日志，球照常显示
@@ -5027,8 +6347,9 @@ class FairyBall(tk.Tk):
                                  ("%s @%dHz" % (_ok[0][:38], _ok[1])) if _ok else "无"), flush=True)
                         if _ok:
                             try:
-                                self.speaker.say("我能听见你说话了", level="advice")
-                                print("[fairy] 首次基线：已确认可用麦克风 -> 已提示 (%s)" % _ok[0][:50], flush=True)
+                                # ★ 2026-10-12：不再播"我能听见你说话了"（用户要求删除）；
+                                #   启动播报内容由「启动播报内容」设置控制。
+                                print("[fairy] 首次基线：已确认可用麦克风 (%s)" % _ok[0][:50], flush=True)
                             except Exception as _e_m:
                                 print("[fairy] 首次麦克风提示失败: %s: %s" % (type(_e_m).__name__, _e_m), flush=True)
                         else:
@@ -5141,4 +6462,35 @@ if __name__ == "__main__":
         sys.exit(hw_selftest())
     if "--selftest" in sys.argv:
         sys.exit(selftest())
-    FairyBall().mainloop()
+    if "--testbar" in sys.argv:
+        # ★ 2026-10-12【提示条自检】强制画提示条 + 截屏落盘，
+        #   验证"任务运行时进度条/提示条"机制本身是否正常。
+        from PIL import ImageGrab
+        try:
+            import fairy_root as _fr
+        except Exception:
+            _fr = None
+        _app = FairyBall()
+        _app.update_idletasks()
+        _app.state.running = True
+        _app.state.progress = 62
+        _app.state.doing = "提示条自检：任务执行中"
+        _app._local_task = "提示条自检任务"
+        _out = os.path.join(getattr(_fr, "LOG", r"D:\FAIRY\logs") if _fr else r"D:\FAIRY\logs",
+                            "ball_testbar.png")
+        def _shot():
+            try:
+                _x, _y = _app.winfo_x(), _app.winfo_y()
+                _img = ImageGrab.grab((max(0, _x - 60), max(0, _y - 60),
+                                       _x + WIN_W + 60, _y + WIN_H + 60))
+                _img.save(_out)
+                print("testbar saved: " + _out, flush=True)
+            except Exception as _e:
+                print("testbar capture fail: %s" % _e, flush=True)
+            _app.destroy()
+        _app.after(2600, _shot)
+        _app.mainloop()
+        sys.exit(0)
+    _app = FairyBall()
+    _app._boot_progress()
+    _app.mainloop()
