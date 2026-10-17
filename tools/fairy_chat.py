@@ -120,8 +120,11 @@ button{cursor:pointer}
 .engSel{background:var(--bg3);border:1px solid var(--line);color:var(--fg);border-radius:9px;padding:4px 8px;font-size:12px;outline:none;transition:.18s}
 .engSel:hover{border-color:var(--brand1)}
 .spacer{flex:1}
-.iconBtn{width:32px;height:32px;border-radius:10px;background:var(--bg3);border:1px solid var(--line);color:var(--fg2);display:inline-flex;align-items:center;justify-content:center;transition:.18s;font-size:15px}
-.iconBtn:hover{color:var(--fg);border-color:var(--brand1)}
+.iconBtn{width:34px;height:34px;border-radius:11px;background:var(--bg3);border:1px solid var(--line);color:var(--fg2);display:inline-flex;align-items:center;justify-content:center;transition:all .18s;font-size:15px;cursor:pointer;position:relative}
+.iconBtn svg{transition:transform .18s,color .18s}
+.iconBtn:hover{color:var(--brand1);border-color:var(--brand1);background:color-mix(in srgb,var(--bg3) 60%,var(--brand1) 14%);transform:translateY(-1px);box-shadow:0 5px 14px rgba(0,0,0,.22)}
+.iconBtn:hover svg{transform:scale(1.12)}
+.iconBtn:active{transform:translateY(0) scale(.94)}
 .iconBtn.sm{width:24px;height:24px;border-radius:7px;font-size:13px}
 .msgs{flex:1;overflow-y:auto;padding:20px 18px;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth}
 .msg{display:flex;gap:11px;max-width:86%;align-items:flex-start;animation:rise .25s ease}
@@ -147,7 +150,9 @@ button{cursor:pointer}
 .sendBtn:hover{filter:brightness(1.09);transform:translateY(-1px)}
 .sendBtn:disabled{opacity:.5;cursor:default;transform:none;filter:none}
 .attachBar{flex:none;display:flex;align-items:center;gap:8px;padding:2px 16px 6px;font-size:12px;color:var(--fg2)}
-.recOn{color:var(--err)!important;border-color:var(--err)!important;animation:pulse 1.1s infinite}
+.recOn{color:var(--err)!important;border-color:var(--err)!important;background:color-mix(in srgb,var(--err) 12%,var(--bg3))!important;animation:pulse 1.1s infinite}
+.recOn::after{content:"";position:absolute;top:5px;right:5px;width:7px;height:7px;border-radius:50%;background:var(--err);animation:recDot 1.1s infinite}
+@keyframes recDot{0%{box-shadow:0 0 0 0 rgba(242,105,95,.55)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
 /* ============ 右栏：监控（Strata 风格） ============ */
 .rHead{flex:none;font-size:13px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--fg2);
   padding:14px 16px 10px;border-bottom:1px solid var(--line)}
@@ -206,9 +211,9 @@ button{cursor:pointer}
     <div class="msgs" id="msgs"><div class="empty" id="empty">和当前引擎说点什么吧（输入后回车发送）</div></div>
     <div class="attachBar" id="attachBar" style="display:none"><span id="attachInfo"></span><button class="iconBtn sm" id="attachClear" title="移除附件">✕</button></div>
     <div class="inputBar">
-      <button class="iconBtn" id="btnImg" title="上传图片">🖼</button>
-      <button class="iconBtn" id="btnFile" title="上传文件">📎</button>
-      <button class="iconBtn" id="btnVoice" title="语音输入（录音→转文字）">🎤</button>
+      <button class="iconBtn" id="btnImg" title="上传图片"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="17" height="17"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></button>
+      <button class="iconBtn" id="btnFile" title="上传文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="17" height="17"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></button>
+      <button class="iconBtn" id="btnVoice" title="语音输入（录音→转文字）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="17" height="17"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg></button>
       <textarea id="inp" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
       <button class="sendBtn" id="send">发送</button>
     </div>
@@ -407,7 +412,7 @@ async function toggleRec(){
     recFrames = [];
     spNode.onaudioprocess = e=>{ recFrames.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
     source.connect(spNode); spNode.connect(ac.destination);
-    recOn = true; btn.classList.add("recOn"); btn.textContent = "⏹";
+    recOn = true; btn.classList.add("recOn");
     $("sysNote").textContent = "正在录音…再点一次结束并识别";
   }catch(e){ $("sysNote").textContent = "麦克风不可用"; }
 }
@@ -417,7 +422,7 @@ async function stopRec(){
   const len = recFrames.reduce((a,f)=>a+f.length, 0);
   const all = new Float32Array(len); let o=0;
   for(const f of recFrames){ all.set(f, o); o += f.length; }
-  recOn = false; btn.classList.remove("recOn"); btn.textContent = "🎤";
+  recOn = false; btn.classList.remove("recOn");
   if(len < 1600){ $("sysNote").textContent = "录音太短，请重试"; return; }
   const wav = encodeWav(all, ac.sampleRate);
   const b64 = b64FromBuf(wav);
