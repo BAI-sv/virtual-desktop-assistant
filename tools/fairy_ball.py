@@ -4373,8 +4373,6 @@ class FairyBall(tk.Tk):
             _running = False
         _items = [("Fairy 控制面板", self._open_panel), None,
                   ("本地运算 · 切换组合", self._on_right_combo),
-                  (("释放全部资源" if _running else "启动本地运算"),
-                   self._engine_release if _running else self._strata_start), None,
                   ("全部退出 Fairy", self._quit_all)]
         _w = 264
         _h = sum(52 if it else 2 for it in _items) + 18
