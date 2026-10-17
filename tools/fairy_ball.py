@@ -4266,6 +4266,65 @@ class FairyBall(tk.Tk):
         except Exception:
             pass
 
+    # ★ 2026-10-17【DSH 模型联动】fairy 组合 -> DSH 主对话默认模型（provider, model）
+    _DSH_MODEL_BY_ENG = {
+        "strata": ("strata", "qwen3.8-flash-next-unsloth-ud-iq4_xs"),
+        "llm":    ("llm", "qwen3.5-9b"),
+        "vl":     ("vl", "qwen3-vl-8b"),
+    }
+
+    def _dsh_switch_model(self, provider, model):
+        """★ 2026-10-17【DSH 模型联动】切 fairy 组合时，把 DSH 主对话默认模型
+        （cordis.patch.yml 的 agent-default-model）换成对应 provider/model。
+        DSH 在跑就自动重启使其立即生效；没跑则下次 DSH 启动生效。绝不抛异常。"""
+        import re as _re
+        _p = r"C:\Users\Administrator\.dsh\profiles\desktop\cordis.patch.yml"
+        try:
+            if not os.path.exists(_p):
+                return False
+            with open(_p, "r", encoding="utf-8") as _f:
+                _txt = _f.read()
+            _bak = _p + ".bak_fairy_combo"
+            if not os.path.exists(_bak):
+                try:
+                    open(_bak, "w", encoding="utf-8").write(_txt)
+                except Exception:
+                    pass
+            _m = _re.search(r"(- id: agent-default-model\s*\n(?:.*\n)*?)(?=\n- id: |\Z)", _txt)
+            if not _m:
+                return False
+            _block = _m.group(1)
+            _nb = _re.sub(r"(?m)^(    provider: ).*$", lambda _x: _x.group(1) + provider, _block)
+            _nb = _re.sub(r"(?m)^(    model: ).*$", lambda _x: _x.group(1) + model, _nb)
+            _new = _txt[:_m.start(1)] + _nb + _txt[_m.end(1):]
+            if _new != _txt:
+                with open(_p, "w", encoding="utf-8") as _f:
+                    _f.write(_new)
+            _up = False
+            try:
+                import socket as _sk4
+                _s4 = _sk4.socket(); _s4.settimeout(1.0)
+                _up = _s4.connect_ex(("127.0.0.1", 19387)) == 0
+                _s4.close()
+            except Exception:
+                _up = False
+            if _up:
+                try:
+                    import subprocess as _sp4
+                    _sp4.run(["taskkill", "/F", "/IM", "DeepSeek Harness.exe"],
+                             capture_output=True, timeout=10,
+                             creationflags=getattr(_sp4, "CREATE_NO_WINDOW", 0))
+                except Exception:
+                    pass
+                try:
+                    self._bubble("DSH 模型已同步，正在重启 DSH 生效", 4)
+                except Exception:
+                    pass
+                threading.Thread(target=self._ensure_dsh, daemon=True).start()
+            return True
+        except Exception:
+            return False
+
     def _apply_preset(self, nm, eng, port, models, desc):
         """★ 2026-10-17【组合切换核心】右键菜单 + 设置面板共用。
            切组合：先停旧组合引擎，再起新组合引擎，进度播报，统一开 8090 对话页。"""
@@ -4351,6 +4410,12 @@ class FairyBall(tk.Tk):
             try:
                 if eng in ("strata", "llm", "vl"):
                     self._open_chat_web(eng, port, mdl)
+            except Exception:
+                pass
+            try:
+                _dp, _dm = self._DSH_MODEL_BY_ENG.get(eng, (None, None))
+                if _dp:
+                    self._dsh_switch_model(_dp, _dm)
             except Exception:
                 pass
         except Exception as _e:
