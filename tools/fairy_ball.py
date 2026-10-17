@@ -4899,12 +4899,15 @@ class FairyBall(tk.Tk):
                   "Qwen3.8-Flash-Next\u00b7Q5_K_M",
                   "Qwen3.8-Flash-Next\u00b7Q6_K"],
                  "Strata 主力：64G 内存甜点位，写代码/日常全能（推荐）"),
-                ("高精度", "ollama", "11434",
-                 ["qwen3-30b-a3b", "qwen3.8-27b", "qwen3.5-9b"],
-                 "又快又强，长推理/疑难问题"),
-                ("极速", "ollama", "11434",
-                 ["qwen3.5-9b", "qwen3.8-27b", "qwen3-30b-a3b"],
-                 "最快，直答/轻任务，显存占用最小"),
+                ("高精度", "llm", "8085",
+                 ["qwen3.5-9b"],
+                 "更强，长推理/疑难问题（本地 9B 引擎，替代 Ollama）"),
+                ("极速", "strata", "8080",
+                 ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS",
+                  "Qwen3.8-Flash-Next\u00b7Q4_K_M",
+                  "Qwen3.8-Flash-Next\u00b7Q5_K_M",
+                  "Qwen3.8-Flash-Next\u00b7Q6_K"],
+                 "最快，直答/轻任务，Strata 轻模型"),
                 ("游戏模式", "off", "", [],
                  "释放全部引擎与模型，显存全给游戏；语音/轻功能照常"),
             ]
@@ -4984,6 +4987,26 @@ class FairyBall(tk.Tk):
                             try:
                                 if (self._strata_probe().get("state") or "") != "running":
                                     self._strata_start()
+                            except Exception:
+                                pass
+                        elif _eng == "llm":
+                            # ★ 2026-10-17【替代 Ollama】本地文本引擎 llama-server 8085
+                            import socket as _sk3
+                            import subprocess as _sp3
+                            _s3 = _sk3.socket(); _s3.settimeout(0.4)
+                            try:
+                                _s3.connect(("127.0.0.1", 8085)); _s3.close()
+                                return
+                            except Exception:
+                                pass
+                            try:
+                                _p3 = os.path.join(
+                                    os.path.dirname(os.path.abspath(__file__)),
+                                    "fairy_llm.py")
+                                _sp3.Popen([sys.executable, _p3],
+                                           creationflags=getattr(_sp3, "CREATE_NO_WINDOW", 0),
+                                           stdout=_sp3.DEVNULL, stderr=_sp3.DEVNULL)
+                                self._bubble("已拉起本地文本引擎（8085），请稍候", 4)
                             except Exception:
                                 pass
                         elif _eng == "ollama":
