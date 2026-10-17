@@ -239,16 +239,20 @@ def pids_of(match):
     """按命令行匹配找 PID（比按进程名可靠 —— python 有很多个）。
     ★ 2026-10-11：非 python 引擎（llama-server / strata / ollama 等）按进程名兜底查。"""
     if sys.platform.startswith("win"):
+        # ★ 2026-10-17【修复·误报已在跑】查询命令自身也含匹配串，若不排除
+        #   powershell.exe，查询会匹配到"正在执行查询的 PowerShell 进程"本身 →
+        #   永远返回一个 PID → start 误判组件已在跑 → 跳过真正启动。
+        #   （用户实测：DSH 启动了但 Fairy 组件全没起，就是这个原因。）
         ids = [x.strip() for x in _ps(
             '@(Get-CimInstance Win32_Process -Filter "Name=\'python.exe\' or Name=\'pythonw.exe\'"'
-            ' | Where-Object {$_.CommandLine -like \'*%s*\'}).ProcessId' % match
+            ' | Where-Object {$_.Name -ne \'powershell.exe\' -and $_.CommandLine -like \'*%s*\'}).ProcessId' % match
         ).splitlines() if x.strip().isdigit()]
         if ids:
             return ids
         # 非 python 进程（llama-server / strata / ollama 等）：按命令行模糊匹配，
         #   这样能区分多个同名引擎（如文本 9B 和视觉 8B 两个 llama-server）。
         return [x.strip() for x in _ps(
-            "@(Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -like '*%s*'}).ProcessId" % match
+            "@(Get-CimInstance Win32_Process | Where-Object {$_.Name -ne 'powershell.exe' -and $_.CommandLine -like '*%s*'}).ProcessId" % match
         ).splitlines() if x.strip().isdigit()]
     # Linux：pgrep 按命令行匹配（引擎进程也能命中）
     return [x.strip() for x in _ps("pgrep -f '%s'" % match.replace("'", "'\\''"))
@@ -314,7 +318,7 @@ def stop_one(name):
         print("· %s 本来就没在跑" % name)
         return 0
     _ps("Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
-        "Where-Object {$_.CommandLine -like '*%s*'} | ForEach-Object {Stop-Process -Id $_.ProcessId -Force}"
+        "Where-Object {$_.Name -ne 'powershell.exe' -and $_.CommandLine -like '*%s*'} | ForEach-Object {Stop-Process -Id $_.ProcessId -Force}"
         % comp["match"])
     time.sleep(1)
     left = pids_of(comp["match"])
