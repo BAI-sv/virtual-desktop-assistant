@@ -4266,6 +4266,80 @@ class FairyBall(tk.Tk):
         except Exception:
             pass
 
+    def _apply_preset(self, nm, eng, port, models, desc):
+        """★ 2026-10-17【组合切换核心】右键菜单 + 设置面板共用。
+           切组合：先停旧组合引擎，再起新组合引擎，进度播报，统一开 8090 对话页。"""
+        try:
+            if eng == "off":
+                self._engine_release()
+                self._save_ai_cfg({"preset": "game"})
+                self._bubble("游戏模式：全部模型已释放，显存已空出，尽情玩吧", 5)
+                try:
+                    self.say("游戏模式：模型已全部释放，显存已空出，可以开始游戏", "ok")
+                except Exception:
+                    pass
+                return
+            mdl = models[0] if models else ""
+            self._save_ai_cfg({"backend": eng, "model": mdl,
+                               "port": port, "preset": nm})
+            try:
+                threading.Thread(target=self._cleanup_engines,
+                                 args=(eng,), daemon=True).start()
+            except Exception:
+                pass
+            self._bubble("正在切换组合：%s（%s）" % (nm, mdl), 4)
+            try:
+                self.say("正在切换组合：%s" % nm, "doing")
+            except Exception:
+                pass
+            self._preset_progress(nm, port)
+
+            def _ensure():
+                try:
+                    if eng == "strata":
+                        try:
+                            if (self._strata_probe().get("state") or "") != "running":
+                                self._strata_start()
+                        except Exception:
+                            pass
+                    elif eng == "llm":
+                        import socket as _sk3
+                        import subprocess as _sp3
+                        _s3 = _sk3.socket(); _s3.settimeout(0.4)
+                        try:
+                            _s3.connect(("127.0.0.1", 8085)); _s3.close()
+                            return
+                        except Exception:
+                            pass
+                        try:
+                            _p3 = os.path.join(
+                                os.path.dirname(os.path.abspath(__file__)),
+                                "fairy_llm.py")
+                            _sp3.Popen([sys.executable, _p3],
+                                       creationflags=getattr(_sp3, "CREATE_NO_WINDOW", 0),
+                                       stdout=_sp3.DEVNULL, stderr=_sp3.DEVNULL)
+                            self._bubble("已拉起本地文本引擎（8085），请稍候", 4)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            threading.Thread(target=_ensure, daemon=True).start()
+            self._bubble("已切换组合：%s（%s）" % (nm, mdl), 5)
+            try:
+                self.say("已切换组合：%s" % nm, "ok")
+            except Exception:
+                pass
+            try:
+                if eng in ("strata", "llm"):
+                    self._open_chat_web(eng, port, mdl)
+            except Exception:
+                pass
+        except Exception as _e:
+            try:
+                self._bubble("组合切换失败：" + str(_e)[:50], 5)
+            except Exception:
+                pass
+
     def _on_right(self, e):
         """★ 2026-10-11【右键菜单】圆角浮动面板，与设置面板同风格。"""
         self._close_menu()
@@ -4279,6 +4353,7 @@ class FairyBall(tk.Tk):
         except Exception:
             _running = False
         _items = [("Fairy 控制面板", self._open_panel), None,
+                  ("本地运算 · 切换组合", self._on_right_combo),
                   (("释放全部资源" if _running else "启动本地运算"),
                    self._engine_release if _running else self._strata_start), None,
                   ("全部退出 Fairy", self._quit_all)]
@@ -4320,6 +4395,72 @@ class FairyBall(tk.Tk):
                 tk.Frame(_wrap, bg="#d8dfe8", height=1).pack(fill="x", pady=3)
             else:
                 _mk(*_it)
+        _m.bind("<FocusOut>", lambda _ev: self._close_menu())
+        _m.bind("<Escape>", lambda _ev: self._close_menu())
+        _m.focus_force()
+        self._menu_win = _m
+
+    def _on_right_combo(self):
+        """★ 2026-10-17【右键组合切换】右键菜单弹组合选择面板，点选即切换。
+           组合放进「本地运算」入口。"""
+        self._close_menu()
+        _PRESETS = [
+            ("日常全能", "strata", "8080",
+             ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS"],
+             "Strata 主力：写代码/日常全能"),
+            ("高精度", "llm", "8085",
+             ["qwen3.5-9b"],
+             "更强，长推理/疑难问题（本地 9B 引擎）"),
+            ("极速", "strata", "8080",
+             ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS"],
+             "最快，直答/轻任务，Strata 轻模型"),
+            ("游戏模式", "off", "", [],
+             "释放全部引擎与模型，显存全给游戏"),
+        ]
+        _m = tk.Toplevel(self)
+        _m.overrideredirect(True)
+        _m.attributes("-topmost", True)
+        _m.configure(bg="#f2f3f5")
+        _bgk = "#f2f3f5"
+        try:
+            _cur = (self._ai_cfg().get("preset") or "")
+        except Exception:
+            _cur = ""
+        _w = 284
+        _h = len(_PRESETS) * 56 + 18
+        _x = min(self.winfo_pointerx(), self.winfo_screenwidth() - _w - 4)
+        _y = min(self.winfo_pointery(), self.winfo_screenheight() - _h - 4)
+        _m.geometry("%dx%d+%d+%d" % (_w, _h, max(0, _x), max(0, _y)))
+        try:
+            import ctypes
+            _u = ctypes.windll.user32
+            _g = ctypes.windll.gdi32
+            _hwnd = _m.winfo_id()
+            _rgn = _g.CreateRoundRectRgn(0, 0, _w + 1, _h + 1, 22, 22)
+            if _rgn:
+                _u.SetWindowRgn(_hwnd, _rgn, True)
+        except Exception:
+            pass
+        _wrap = tk.Frame(_m, bg=_bgk)
+        _wrap.pack(fill="both", expand=True, padx=6, pady=8)
+
+        def _mk(label, cmd):
+            _fg = "#46536a"
+            _img = _pil_round(label, 266, 48, 12, "#ffffff", _fg, True, "#d8dfe8")[0]
+            _img_h = _pil_round(label, 266, 48, 12, "#e4edf6", _fg, True, "#cdd9e6")[0]
+            _b = tk.Button(_wrap, image=_img, bd=0, relief="flat",
+                           highlightthickness=0, bg=_bgk,
+                           activebackground=_bgk, cursor="hand2",
+                           command=lambda c=cmd: self._menu_click(c))
+            _b.image = _img
+            _b.bind("<Enter>", lambda _ev, b=_b, n=_img, h=_img_h: b.configure(image=h))
+            _b.bind("<Leave>", lambda _ev, b=_b, n=_img, h=_img_h: b.configure(image=n))
+            _b.pack(fill="x", pady=2)
+        for _nm, _eng, _pt2, _models, _desc in _PRESETS:
+            _sel = (_cur == _nm) or (_cur == "game" and _nm == "游戏模式")
+            _ck = "✓ " if _sel else "  "
+            _mk(_ck + _nm, lambda n=_nm, e=_eng, p=_pt2, ms=_models, d=_desc:
+                self._apply_preset(n, e, p, ms, d))
         _m.bind("<FocusOut>", lambda _ev: self._close_menu())
         _m.bind("<Escape>", lambda _ev: self._close_menu())
         _m.focus_force()
