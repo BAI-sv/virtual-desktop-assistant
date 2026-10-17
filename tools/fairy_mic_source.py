@@ -65,16 +65,22 @@ def _probe_mean(idx, sr=48000, secs=0.2):
 
 
 def pick_input(devs):
-    """试开每个候选，选信号最强的可用设备（麦克风优先已排序）。"""
+    """★ 2026-10-17【修复·选错设备】优先 kind=麦克风（信号可用即可收），
+    不再按"信号最强"选 —— 否则削波的线路输入（峰值≈1.0）会被当成
+    "最强信号"抢走，真麦克风反而被放弃 → 听不见人声。
+    顺序：真麦克风 → 线路/其他 → 蓝牙免提（最后）。"""
     if not devs:
         return None
-    best, best_mean = None, -1.0
     for d in devs:
-        m = _probe_mean(d["index"])
-        if m >= 0:
-            if best is None or m > best_mean:
-                best, best_mean = d, m
-    return best
+        if d["kind"] in ("麦克风", "USB") and _probe_mean(d["index"]) >= 0:
+            return d
+    for d in devs:
+        if d["kind"] in ("线路", "其他") and _probe_mean(d["index"]) >= 0:
+            return d
+    for d in devs:
+        if _probe_mean(d["index"]) >= 0:
+            return d
+    return None
 
 
 class FairyMicSource:
