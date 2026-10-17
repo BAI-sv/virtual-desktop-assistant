@@ -23,6 +23,12 @@ from PIL import Image
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 kernel32 = ctypes.windll.kernel32
+# ★ 2026-10-17 修复：DefWindowProcW 若不设 argtypes，ctypes 默认按 32 位 c_int 处理，
+#   而窗口过程回调（WNDPROC，参数用 c_ssize_t）拿到的 lparam 是 64 位，传大值会
+#   抛 OverflowError: int too long to convert（fairy_rim.py.log 反复刷此错）。
+#   显式声明为 64 位参数（WPARAM/LPARAM）即可根治。
+user32.DefWindowProcW.argtypes = [wt.HWND, ctypes.c_uint, ctypes.c_ssize_t, ctypes.c_ssize_t]
+user32.DefWindowProcW.restype = ctypes.c_ssize_t
 
 WS_EX_LAYERED = 0x00080000
 WS_EX_TOOLWINDOW = 0x00000080
