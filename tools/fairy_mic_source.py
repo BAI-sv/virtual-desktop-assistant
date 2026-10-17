@@ -65,12 +65,21 @@ def _probe_mean(idx, sr=48000, secs=0.2):
 
 
 def pick_input(devs):
-    """★ 2026-10-17【修复·选错设备】优先 kind=麦克风（信号可用即可收），
-    不再按"信号最强"选 —— 否则削波的线路输入（峰值≈1.0）会被当成
-    "最强信号"抢走，真麦克风反而被放弃 → 听不见人声。
-    顺序：真麦克风 → 线路/其他 → 蓝牙免提（最后）。"""
+    """★ 2026-10-17【修复·听不见人声】优先用【系统默认输入设备】（用户明确要求
+    "直接用默认的"）—— 之前用 Sound Mapper(idx0) 采集不到人声；其次才按 kind
+    挑真麦克风（信号可用即可收），不再按"信号最强"选（会误选削波的线路输入）。
+    顺序：默认输入 → 真麦克风 → 线路/其他 → 蓝牙免提（最后）。"""
     if not devs:
         return None
+    # 0) 系统默认输入设备（用户要"直接用默认的"；= USB 麦克风 idx1）
+    try:
+        if sd is not None and sd.default.device and sd.default.device[0] is not None:
+            di = sd.default.device[0]
+            for d in devs:
+                if d["index"] == di and _probe_mean(di) >= 0:
+                    return d
+    except Exception:
+        pass
     for d in devs:
         if d["kind"] in ("麦克风", "USB") and _probe_mean(d["index"]) >= 0:
             return d
