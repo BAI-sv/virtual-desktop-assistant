@@ -43,6 +43,7 @@ _BASE = {"strata": "http://127.0.0.1:8080",
          "ollama": "http://127.0.0.1:11434",
          "llm": "http://127.0.0.1:8085",
          "vision": "http://127.0.0.1:8086",
+         "vl": "http://127.0.0.1:8086",
          "dsh": "http://127.0.0.1:19387"}
 if os.name == "nt":
     CREATE_NO_WINDOW = 0x08000000

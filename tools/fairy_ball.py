@@ -4321,6 +4321,25 @@ class FairyBall(tk.Tk):
                             self._bubble("已拉起本地文本引擎（8085），请稍候", 4)
                         except Exception:
                             pass
+                    elif eng == "vl":
+                        import socket as _sk4
+                        import subprocess as _sp4
+                        _s4 = _sk4.socket(); _s4.settimeout(0.4)
+                        try:
+                            _s4.connect(("127.0.0.1", 8086)); _s4.close()
+                            return
+                        except Exception:
+                            pass
+                        try:
+                            _p4 = os.path.join(
+                                os.path.dirname(os.path.abspath(__file__)),
+                                "fairy_vl.py")
+                            _sp4.Popen([sys.executable, _p4],
+                                       creationflags=getattr(_sp4, "CREATE_NO_WINDOW", 0),
+                                       stdout=_sp4.DEVNULL, stderr=_sp4.DEVNULL)
+                            self._bubble("已拉起视觉引擎（8086），请稍候", 4)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             threading.Thread(target=_ensure, daemon=True).start()
@@ -4330,7 +4349,7 @@ class FairyBall(tk.Tk):
             except Exception:
                 pass
             try:
-                if eng in ("strata", "llm"):
+                if eng in ("strata", "llm", "vl"):
                     self._open_chat_web(eng, port, mdl)
             except Exception:
                 pass
@@ -4411,9 +4430,9 @@ class FairyBall(tk.Tk):
             ("高精度", "llm", "8085",
              ["qwen3.5-9b"],
              "更强，长推理/疑难问题（本地 9B 引擎）"),
-            ("极速", "strata", "8080",
-             ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS"],
-             "最快，直答/轻任务，Strata 轻模型"),
+            ("极速", "vl", "8086",
+             ["qwen3-vl-8b"],
+             "视觉模型，可看图可对话（Qwen3-VL-8B）"),
             ("游戏模式", "off", "", [],
              "释放全部引擎与模型，显存全给游戏"),
         ]
@@ -5043,12 +5062,9 @@ class FairyBall(tk.Tk):
                 ("高精度", "llm", "8085",
                  ["qwen3.5-9b"],
                  "更强，长推理/疑难问题（本地 9B 引擎，替代 Ollama）"),
-                ("极速", "strata", "8080",
-                 ["Qwen3.8-Flash-Next\u00b7UD-IQ4_XS",
-                  "Qwen3.8-Flash-Next\u00b7Q4_K_M",
-                  "Qwen3.8-Flash-Next\u00b7Q5_K_M",
-                  "Qwen3.8-Flash-Next\u00b7Q6_K"],
-                 "最快，直答/轻任务，Strata 轻模型"),
+                ("极速", "vl", "8086",
+                 ["qwen3-vl-8b"],
+                 "视觉模型，可看图可对话（Qwen3-VL-8B）"),
                 ("游戏模式", "off", "", [],
                  "释放全部引擎与模型，显存全给游戏；语音/轻功能照常"),
             ]
