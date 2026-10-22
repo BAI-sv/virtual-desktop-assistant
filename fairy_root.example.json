@@ -1,0 +1,10 @@
+{
+  "_说明": "虚拟桌面助手 配置根【示例】。复制成 fairy_root.json，改成本机实际路径即可（放项目根目录或 tools/ 下都行）。",
+  "_优先级": "环境变量 FAIRY_ROOT > fairy_root.json 的 root > 自动推断（fairy_root.py 所在 tools 的上一级）",
+  "_提示": "root 不改也能跑：自动推断支持「整个项目放到任何目录」，只要 tools/ 在里面。",
+  "root": "<FAIRY_ROOT>",
+  "workdir": "<FAIRY_ROOT>",
+  "indextts_root": "<INDEXTTS_ROOT>",
+  "voice_src": "<FAIRY_ROOT>\\work\\fairy_voice",
+  "asset_src": "<FAIRY_ROOT>\\work\\fairy_assets"
+}
