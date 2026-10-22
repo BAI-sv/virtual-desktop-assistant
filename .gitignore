@@ -1,0 +1,137 @@
+﻿# ============================================================
+# FairyX .gitignore
+# 原则：源码、文档、示例配置进仓库；模型、环境、日志、运行产物一律排除
+# ============================================================
+
+# ---------- 大文件 / 二进制资产 ----------
+/models/
+/envs/
+/voice/
+/wakeword/
+/dist/
+/everything/
+/_video_sample/
+/tools/bin/
+/tools/LibreHardwareMonitor*/
+/tools/tmp_ewelink_ha/
+/tools/*.zip
+/fairy.pyz
+*.gguf
+*.safetensors
+*.ckpt
+*.onnx
+*.pt
+*.pth
+*.wav
+*.mp3
+*.mp4
+*.avi
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- 运行时数据（含路径、状态、PID）----------
+/logs/
+/data/
+/robot/
+*.pid
+*.log
+*.jsonl
+/config.json
+/fairy.json
+/advisor.json
+/briefing.json
+/fairy_ball_pos.json
+/install_ok.json
+/fairy_root.json
+*.bak
+*.bak_*
+*_pos.json
+*_state.json
+
+# 例外：示例配置要进仓库
+!/config.example.json
+!/fairy.example.json
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 临时文件 ----------
+*.tmp
+*.temp
+*.cache
+/tmp/
+/temp/
+_scratch/
+*.bak_privacy
+*.bak_ollama
+
+# ---------- 第三方素材（版权不明，不进仓库）----------
+/assets/*.gif
+
+# ---------- 第三方项目临时副本（需要时用脚本重新拉取）----------
+/tools/tmp_*/
+/tools/install_ok.json
+/tools/ha_setup/
+
+# ---------- 凭据 ----------
+.env
+.env.*
+secrets.json
+credentials.json
+*.pem
+*.key
+/glasses/keys.py
+
+# ---------- 重构临时备份（不进仓库，确认无误后自行删除）----------
+/tools/_refactor_backup/
+
+# ---------- 旧版开源仓库副本（独立 git 仓库，不进本仓库）----------
+/opensource/
+# ---------- 本机专属（符号链接 / 快捷方式 / 模型清单）----------
+/models
+*.lnk
+Modelfile-*
+/downloads/
+# ---------- 内部工作规则（给 AI 的，不公开）----------
+/AGENTS.md
+
+# ---------- 本机专属文档（含本机路径/个人信息，不公开）----------
+/models_deploy.md
+/Fairy说明书.md
+/README_中文使用说明.md
+
+# ---------- g2pW 音素化模型（154 MB，第三方数据，不进仓库）----------
+/tools/g2pW/
+*.broken_*
