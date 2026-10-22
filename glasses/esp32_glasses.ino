@@ -33,6 +33,7 @@ const char *WIFI_PASS = "你的密码";            // ← 改成你的密码
 const char *CENTER_HOST = "192.168.1.100";    // ← 跑 ai_center.py 那台机器
 const uint16_t CENTER_PORT = 5000;
 const char *DEVICE_NAME = "智能眼镜";           // 设备池里显示的名字
+const char *NAV_DEST = "目的地";                // 长按导航的默认目的地，改这里
 
 // 按键
 #define KEY_GPIO      4
@@ -299,14 +300,14 @@ static void do_voice_chat() {
   }
 }
 
-// 长按 0.8~1.5s：导航
+// 长按 0.8~1.5s：导航（默认目的地 = 配置区 NAV_DEST）
 static void do_nav() {
-  String r = http_post_json("/nav?destination=" + String("范县东收费站"), "{}");
+  String r = http_post_json("/nav?destination=" + String(NAV_DEST), "{}");
   StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, r)) return;
   const char *km = doc["distance_km"] | "0";
   const char *min = doc["duration_min"] | "0";
-  String text = String("导航到范县东收费站，约") + km + "公里，" + min + "分钟。";
+  String text = String("导航中，约") + km + "公里，" + min + "分钟。";
   JsonArray st = doc["steps"].as<JsonArray>();
   int i = 0;
   for (JsonVariant s : st) { if (i++ >= 3) break; text += String((const char *)s) + "。"; }

@@ -28,7 +28,7 @@ POST http://127.0.0.1:5000/chat  {"text":"你好"} -> {"ok":true,"text":"...","p
 POST http://127.0.0.1:5000/translate {"text":"hello","to":"zh"}
 POST http://127.0.0.1:5000/tts     {"text":"你好"} -> audio/wav
 POST http://127.0.0.1:5000/vqa?mode=look  (raw JPEG body)
-POST http://127.0.0.1:5000/nav?destination=范县东收费站
+POST http://127.0.0.1:5000/nav?destination=目的地    (示例：/nav?destination=公司，默认起点在 keys.py 的 PUYANG)
 POST http://127.0.0.1:5000/device/register {"device_id":"x","name":"智能眼镜","type":"glasses"}
 ```
 
@@ -70,7 +70,7 @@ POST http://127.0.0.1:5000/device/register {"device_id":"x","name":"智能眼镜
 |---|---|
 | 短按 | 识别当前画面并翻译文字，播报 |
 | 双击 | 语音对话（录 5 秒 → 识别 → 回答 → 播放） |
-| 长按 0.8~1.5 秒 | 高德导航到范县东收费站（播报里程/时长/前 3 条指令） |
+| 长按 0.8~1.5 秒 | 高德导航到默认目的地（固件里改，播报里程/时长/前 3 条指令） |
 | 长按 1.5~3 秒 | 购物点评（拍商品，点评值不值） |
 | 长按 >3 秒 | 看图说话（详细描述画面） |
 
