@@ -9,8 +9,8 @@ import socket
 import subprocess
 import sys
 
-LLAMA = r"D:\NAI-xiao\llama.cpp\vulkan-qwen3.8-27B\llama-b10839-bin-win-vulkan-x64\llama-server.exe"
-MODEL = r"F:\ComfyUI模型\models\LLM\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"
+LLAMA = r"D:\llama.cpp\vulkan-qwen3.8-27B\llama-b10839-bin-win-vulkan-x64\llama-server.exe"
+MODEL = r"D:\ComfyUI\models\LLM\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"
 PORT = 8085
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fairy_llm.log")
 

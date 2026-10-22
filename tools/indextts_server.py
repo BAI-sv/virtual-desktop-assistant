@@ -9,11 +9,11 @@ IndexTTS 常驻合成服务（跑在 IndexTTS 自己的 venv 里）。
   3. 这样"Fairy 本体音色"和"自定义音色"只是换一个 ref_audio 参数。
 
 自动适配两套安装：
-  * 【首选】D:\\NAI-xiao\\apps\\Index-TTS  —— 官方 IndexTTS 2.5 + ROCm GPU torch
+  * 【首选】D:\\Index-TTS  —— 官方 IndexTTS 2.5 + ROCm GPU torch
   * 【备选】D:\\Index-tts-2.0-Windows-AMD —— 老整合包，CPU
 
 关键环境：ROCm 是以 pip 包形式装在 venv 里的（不在 System32），
-要照 NAI-xiao 的 config\\amd.bat 用 `rocm-sdk` 取出路径并设 ROCM_PATH/HIP_PATH，
+要照 IndexTTS 的 config\\amd.bat 用 `rocm-sdk` 取出路径并设 ROCM_PATH/HIP_PATH，
 且必须在 import torch 之前完成。
 
 接口：
@@ -44,7 +44,7 @@ def log(s):
 
 
 def setup_rocm_env():
-    """按 NAI-xiao 的 amd.bat 配置 ROCm SDK 路径。必须在 import torch 之前调用。"""
+    """按 IndexTTS 的 amd.bat 配置 ROCm SDK 路径。必须在 import torch 之前调用。"""
     scripts = os.path.dirname(sys.executable)
     sdk = os.path.join(scripts, "rocm-sdk.exe")
     if not os.path.exists(sdk):

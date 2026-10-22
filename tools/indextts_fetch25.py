@@ -2,7 +2,7 @@
 """
 把 IndexTTS 2.5 的模型文件补齐（按文件尺寸自动比对，只拉不匹配的）。
 
-根因（实测）：NAI-xiao 整合包用 `indextts2 download` 拉的是 **IndexTeam/IndexTTS-2（2.0）**
+根因（实测）：IndexTTS 整合包用 `indextts2 download` 拉的是 **IndexTeam/IndexTTS-2（2.0）**
 仓库，但仓库代码与 `infer_v2_5.py` 是 **2.5**。两者文件集与形状都不同：
     2.0 的 gpt.pth: text_embedding = [12001, 1280]
     2.5 的 config.yaml 要求:      = [60510, 1280]   （多语言词表）

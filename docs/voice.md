@@ -295,7 +295,7 @@ py -3.12 <项目根>\tools\build_line_pools.py       :: 从语料库构建"执�
 **安装位置**（启动器会按优先级找）：
 
 ```
-D:\NAI-xiao\apps\Index-TTS        （venv\Scripts\python.exe）   ← 首选
+D:\Index-TTS        （venv\Scripts\python.exe）   ← 首选
 D:\Index-tts-2.0-Windows-AMD      （env\python.exe）             ← 后备
 ```
 

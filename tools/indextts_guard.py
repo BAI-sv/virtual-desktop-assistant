@@ -15,7 +15,7 @@ indextts_guard.py —— IndexTTS(:9881) 保活守护
     py -3.12 D:\\FAIRY\\tools\\indextts_guard.py --stop         停掉守护（不杀 IndexTTS 本身）
 
 【拉起方式】★ 复用 indextts_start.py 的候选逻辑（不自己发明）：
-    它内部按 D:\\NAI-xiao\\apps\\Index-TTS\\venv -> D:\\Index-tts-2.0-Windows-AMD\\env 找解释器，
+    它内部按 D:\\Index-TTS\\venv -> D:\\Index-tts-2.0-Windows-AMD\\env 找解释器，
     以 indextts_server.py 起服务，并写 D:\\FAIRY\\indextts.pid。
     守护这里【后台】起它（不阻塞本循环），随后自己轮询 /health 等 loaded=true。
 

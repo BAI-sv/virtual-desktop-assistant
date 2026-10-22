@@ -279,7 +279,7 @@ def probe_tools():
 
     # ---- 便携目录类：查特征目录（比名字匹配可靠）----
     for name, dirs in (("GPT-SoVITS", [r"D:\GPT-SoVITS-v2pro"]),
-                       ("ComfyUI", [r"D:\ComfyUI_windows_portable", r"D:\Comfyui-xiao-v2",
+                       ("ComfyUI", [r"D:\ComfyUI_windows_portable", r"D:\Comfyui-v2",
                                 fairy_root.NAI_ROOT]),
                        ("DevEco Studio", [r"E:\DevEco Studio", r"C:\Program Files\Huawei\DevEco Studio"]),
                        ("HIP/ROCm", [r"C:\Program Files\AMD\ROCm"]),

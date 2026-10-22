@@ -2,7 +2,7 @@
 """
 拉起 IndexTTS 常驻合成服务，并等 9881 端口就绪。
 
-优先用 NAI-xiao（晓子ya 整合包）里的【官方 IndexTTS 2.5 + ROCm GPU】，
+优先用 IndexTTS 整合包里的【官方 IndexTTS 2.5 + ROCm GPU】，
 它不可用时回退到老的 D:\\Index-tts-2.0-Windows-AMD（CPU）。
 
 用法： py -3.12 tools\\indextts_start.py

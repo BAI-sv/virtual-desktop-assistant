@@ -13,7 +13,7 @@ fairy_host.py —— Fairy 自己的本地小服务（让球在没有 DSH 时也
 【端口】19388（可用 FAIRY_LOCAL_BASE 或 fairy.json 的 endpoints.local_base 改）
   ★ 选 19388 前已实测：2026-10-10 该端口未被占用。
 
-【实现的接口】（★ 契约与 DSH 插件一致，见 E:\\Downloads\\fairy\\fairy-plugin\\lib\\index.js）
+【实现的接口】（★ 契约与 DSH 插件一致，见 fairy-plugin\\lib\\index.js）
   GET  /api/fairy/meta   -> 球的外形/状态。frames/size/fps 由本地 assets 现算；
                             running/progress 是【DSH 专属的活体状态】，
                             本地算不出来就返回 null（球本来就按 null=未知 处理）。

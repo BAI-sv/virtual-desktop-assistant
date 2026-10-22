@@ -378,7 +378,7 @@ def check_ball():
         add("ball_log", "球运行日志", "warn", "日志读不了：%s" % str(e)[:60], "检查 %s 权限/占用" % logp)
     if not os.path.exists(BALL_PY):
         add("ball_src", "球脚本", "bad", "fairy_ball.py 不见了",
-            "从 E:\\Downloads\\fairy\\fairy_ball.py 拷回 D:\\FAIRY\\tools\\")
+            "从 fairy_ball.py 拷回 D:\\FAIRY\\tools\\")
 
 
 def check_config():

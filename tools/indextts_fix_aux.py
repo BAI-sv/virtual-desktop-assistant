@@ -3,7 +3,7 @@
 把老整合包里的辅助权重拼装成【官方 IndexTTS 2.5】要的扁平结构。
 
 背景（实测）：
-  NAI-xiao 的 `indextts2 download` 只下全了主模型（gpt.pth / s2mel.pth / qwen0.6bemo），
+  IndexTTS 的 `indextts2 download` 只下全了主模型（gpt.pth / s2mel.pth / qwen0.6bemo），
   辅助模型要么没下、要么卡在 ._____temp 里没搬出来：
       hf_cache/w2v-bert-2.0/model.safetensors   临时只到 0.47GB（完整 2.16GB）
       hf_cache/semantic_codec_model.safetensors  缺

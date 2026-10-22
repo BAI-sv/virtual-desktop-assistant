@@ -21,7 +21,7 @@ _WIN = (os.name == "nt")
 #     FAIRY_LLM27_SERVER=/opt/llama.cpp/build/bin/llama-server
 #     FAIRY_LLM27_MODEL=/models/Qwen3.8-27B-Uncensored-Q4_K_M.gguf
 LLAMA = os.environ.get("FAIRY_LLM27_SERVER") or (
-    r"D:\NAI-xiao\llama.cpp\vulkan-qwen3.8-27B\llama-b10839-bin-win-vulkan-x64\llama-server.exe"
+    r"D:\llama.cpp\vulkan-qwen3.8-27B\llama-b10839-bin-win-vulkan-x64\llama-server.exe"
     if _WIN else "/opt/llama.cpp/build/bin/llama-server")
 LLAMA_DIR = os.path.dirname(LLAMA)
 MODEL = os.environ.get("FAIRY_LLM27_MODEL") or (
