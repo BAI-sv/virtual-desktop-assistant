@@ -5,7 +5,7 @@
 用法：
   py -3.12 tools/fairy_gitsync.py            # 同步一次（有变更则 commit+push）
   py -3.12 tools/fairy_gitsync.py --cron 30  # 守护模式：每 30 分钟检查一次
-  py -3.12 tools/fairy_gitsync.py --repo 路径 # 指定仓库（默认 fairyx_repo）
+  py -3.12 tools/fairy_gitsync.py --repo 路径 # 指定仓库（默认项目主仓库 D:\FAIRY）
 """
 import argparse, datetime, os, subprocess, sys, time
 
@@ -13,13 +13,13 @@ import argparse, datetime, os, subprocess, sys, time
 #   父进程没控制台时（pythonw / 计划任务），不加这个起 git 就会弹终端。
 CREATE_NO_WINDOW = 0x08000000
 
-# 默认仓库：脚本上级的 opensource/fairyx_repo（不存在时用 --repo 指定）
-DEFAULT_REPO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "opensource", "fairyx_repo")
+# 默认仓库：脚本上级目录（D:\FAIRY 即项目主仓库，不存在时用 --repo 指定）
+DEFAULT_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if not os.path.isdir(DEFAULT_REPO):
     DEFAULT_REPO = ""
 REMOTE = "origin"
-BRANCH = "main"
+BRANCH = "master"      # 本地分支名
+REMOTE_BRANCH = "main" # GitHub 远端分支名
 
 
 def run(cmd, cwd):
@@ -46,8 +46,8 @@ def sync(repo):
     rc, out = run(["git", "commit", "-m", msg], repo)
     if rc != 0 and "nothing to commit" not in out:
         return "commit 失败: %s" % out
-    # 3) 推送（凭据管理器自动认证）
-    rc, out = run(["git", "push", REMOTE, BRANCH], repo)
+    # 3) 推送（凭据管理器自动认证；本地 master -> 远端 main）
+    rc, out = run(["git", "push", REMOTE, BRANCH + ":" + REMOTE_BRANCH], repo)
     if rc != 0:
         return "push 失败: %s" % out
     return "已自动上传 %s -> %s（%s）" % (REMOTE, BRANCH, now)

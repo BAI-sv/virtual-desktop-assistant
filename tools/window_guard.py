@@ -127,8 +127,6 @@ _FILE_RE = re.compile(
 # 找文件时扫描的目录（深度受限，避免全盘慢扫）
 SEARCH_DIRS = [
     HERE,
-    os.path.join(os.path.dirname(HERE), "opensource", "fairyx_repo"),
-    os.path.join(os.path.dirname(HERE), "opensource", "fairyx_repo", "tools"),
     os.path.join(os.path.dirname(HERE), "docs"),
     os.path.expanduser("~/Desktop"),
     os.path.expanduser("~/Documents"),
