@@ -119,12 +119,28 @@ def pick_input(devs):
             except Exception:
                 pass
     # 1) 系统默认输入设备（用户要"直接用默认的"）
+    #    ★★ 2026-10-24【修复·默认设备可能是哑的】
+    #    原来这里判 `_probe_mean(di) >= 0`（能打开就算），
+    #    结果这台机器上 Windows 默认输入是「麦克风 (AMD Streaming Audio Device)」，
+    #    实测峰值恒为 0.0000 —— 它是显卡的 HDMI/DP 音频设备，根本没有输入。
+    #    Fairy 挂上去之后 KWS 5700 块一次没命中，喊破喉咙也没反应。
+    #    现在和上面 AMD 那步用同一个门槛：信号够 MIN_USABLE 才认，
+    #    不够就记一笔原因、继续往下挑真麦克风。
     try:
         if sd is not None and sd.default.device and sd.default.device[0] is not None:
             di = sd.default.device[0]
             for d in devs:
-                if d["index"] == di and _probe_mean(di) >= 0:
-                    return d
+                if d["index"] == di:
+                    lvl = _probe_mean(di)
+                    if lvl >= MIN_USABLE:
+                        return d
+                    try:
+                        print("[mic] 系统默认输入「%s」信号 %.0f < 门槛 %.0f，跳过"
+                              % ((d.get("name") or "?")[:40], lvl, MIN_USABLE),
+                              flush=True)
+                    except Exception:
+                        pass
+                    break
     except Exception:
         pass
     # 2) 真麦克风 / USB，按信号从强到弱挑（不再拿第一个能打开的）
@@ -140,12 +156,40 @@ def pick_input(devs):
     if cands:
         cands.sort(key=lambda x: -x[0])
         return cands[0][1]
+    # 3) 线路 / 其他
+    #    ★★ 2026-10-24：这里原来也是 `>= 0`（能打开就算），
+    #    结果 idx 0「Microsoft Sound Mapper - Input」信号恒为 0 却被选中，
+    #    根本走不到下面的兜底排序。现在同样要求 MIN_USABLE。
     for d in devs:
-        if d["kind"] in ("线路", "其他") and _probe_mean(d["index"]) >= 0:
-            return d
+        if d["kind"] in ("线路", "其他"):
+            try:
+                if _probe_mean(d["index"]) >= MIN_USABLE:
+                    return d
+            except Exception:
+                pass
+
+    # 4) 兜底：能打开的设备里挑【信号最强】的
+    #    ★★ 2026-10-24：原来直接 `return` 第一个能打开的，
+    #    结果选中 idx 0「Microsoft Sound Mapper」—— 它的信号恒为 0，
+    #    等于给 Fairy 塞了个聋耳朵。现在按实测信号排序，
+    #    至少能挑到蓝牙耳机那种「有微弱起伏」的设备。
+    best = None
+    best_lvl = -1.0
     for d in devs:
-        if _probe_mean(d["index"]) >= 0:
-            return d
+        try:
+            lvl = _probe_mean(d["index"])
+        except Exception:
+            continue
+        if lvl > best_lvl:
+            best_lvl = lvl
+            best = d
+    if best is not None:
+        try:
+            print("[mic] 没有达标设备（门槛 %.0f），退而选信号最强的：%s（%.0f）"
+                  % (MIN_USABLE, (best.get("name") or "?")[:40], best_lvl), flush=True)
+        except Exception:
+            pass
+        return best
     return None
 
 

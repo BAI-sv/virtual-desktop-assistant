@@ -74,12 +74,6 @@ from ball_extracted import (
     ASSETS, BALANCE_API, CRED_FILE, HW_REFRESH_S, HwMonitor, LINE_POOLS_FILE, POLL_MS, SIZE, STRATA_DIR, STRATA_PORT, State, _BITMAPINFO, _BITMAPINFOHEADER, _BLENDFUNCTION, _MEMORYSTATUSEX, _PANEL_BG, _PANEL_BG_RGB, _PIL_CACHE, _PRE_SEQ, _PRE_SEQ_LOCK, _PUNCT, _dim_frame, _free_ram_gb, _hw_color, _load_line_pools, _next_prefetch_stage, _norm, _panel_bar, _pil_round, _placeholder_frame, _ptext, _resolve_strata_dir, _rm_quiet, _rnw, _round_rect, _split_for_speech, _strata_cmd, _user32, fix_mojibake, fmt_tokens, hw_selftest, load_frames, play_audio, read_balance, retail_bubble, selftest, to_premultiplied_bgra, virtual_screen,
 )
 
-# ★ 2026-10-23 把本模块的全局名注入 Mixin
-#   ★ 必须在【所有 import 之后】调用 —— 之前放在 ball_mixins 导入后、
-#     ball_extracted 导入前，导致 virtual_screen / load_frames 这些
-#     还没进 globals，Mixin 拿不到，球一启动就 NameError 退出。
-from ball_mixins import bind_globals as _bind_mixin_globals
-_bind_mixin_globals(globals())
 
 
 
@@ -2041,6 +2035,18 @@ class FairyBall(WindowMixin, InputMixin, BubbleMixin, StrataMixin, AiCfgMixin, V
 
 
 
+
+
+# ===========================================================================
+# ★★ 2026-10-24【修·_panel_backing 未定义】
+#   Mixin 的方法体在【调用时】才查全局名，但 _panel_backing / make_bubble
+#   这些函数定义在文件后半段（L700+）。之前把 bind_globals 放在 import 区
+#   末尾（L100），那时它们还不存在，注入失败，于是每帧都刷
+#     「进度条渲染失败: name '_panel_backing' is not defined」
+#   移到文件最末尾（所有定义都执行完之后）再绑定。
+# ===========================================================================
+from ball_mixins import bind_globals as _bind_mixin_globals
+_bind_mixin_globals(globals())
 
 
 if __name__ == "__main__":

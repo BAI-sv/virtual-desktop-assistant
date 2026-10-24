@@ -1075,13 +1075,18 @@ def _qa_cache_put(text, ans):
     _QA_CACHE[text] = (ans, time.time())
 
 
-def synth_to_file(text):
+def synth_to_file(text, tag=None):
     """合成音频（Fairy 克隆音色）并落盘。返回文件路径或 None。
 
     ★【2026-10-10 独立运行改造】原来只打死了 DSH 的 /api/fairy/say，
       DSH 一关耳朵就说不出话。现在走 fairy_endpoints.tts_get() 的统一降级链：
         9881 直连 -> DSH 插件 -> 本地 fairy_host -> DSH tts-api
       契约不变（拿回音频字节，落盘），音色不变（同一个 IndexTTS + 同一份参考音频）。
+
+    ★★ 2026-10-24【全双工 · 分句流式】新增 tag 参数。
+      并发合成多句时必须区分文件名，否则后一句会把前一句覆盖掉，
+      播放器读到一半文件被改就是一段杂音。
+      tag 形如 "_s0"/"_s1"，不传就和原来一样写 ear_say.wav。
     """
     r = ep.tts_get(text)
     if not (r and r.get("ok") and r.get("data")):
@@ -1094,12 +1099,98 @@ def synth_to_file(text):
         return None
     is_mp3 = (data[:3] == b"ID3"
               or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0))
-    p = os.path.join(LOG, "ear_say" + (".mp3" if is_mp3 else ".wav"))
+    p = os.path.join(LOG, "ear_say%s.%s" % (tag or "", "mp3" if is_mp3 else "wav"))
     with open(p, "wb") as f:
         f.write(data)
     print("[ear] 语音=克隆路由(%s|%s) %d 字节"
           % (r.get("voice"), r.get("route"), len(data)), flush=True)
     return p
+
+
+# ===========================================================================
+# ★★ 2026-10-24【全双工 第 1 步】TTS 分句流式
+#
+# 问题：原来 speak_text 是「整段合成 -> 整段播放」。
+#       IndexTTS 是自回归的，文本越长线性越慢（实测 30 秒音频要 26 秒合成），
+#       这期间用户什么都听不到 —— 首字延迟 1~3 秒。
+#
+# 现在：按标点切句，第 1 句合成完立刻播，同时后台合成第 2 句。
+#      合成和播放并行，首字延迟降到「第一句的合成时间」。
+#
+# 并行怎么做的：play_wav 是阻塞的（播完才返回），
+#      所以主线程播第 1 句时，worker 线程已经在合成第 2、3 句了。
+# ===========================================================================
+def _split_for_speech(text, max_len=42, min_len=4):
+    """把一句话切成适合逐句合成的小段。
+
+    切分规则（优先级从高到低）：
+      1) 句末标点 。！？!?… 后面切
+      2) 逗号、分号、顿号 ，；,; 后面切（仅当已经攒够 min_len）
+      3) 单段超过 max_len 时硬切
+    文本本来就短（<= max_len）就原样返回，避免拆得太碎、语调断裂。
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    if len(t) <= max_len:
+        return [t]
+
+    out = []
+    buf = ""
+    for ch in t:
+        buf += ch
+        is_end = ch in "。！？!?…"
+        is_pause = ch in "，；,;"
+        if is_end and len(buf) >= 2:
+            out.append(buf.strip())
+            buf = ""
+        elif is_pause and len(buf) >= min_len and len(buf) < max_len:
+            out.append(buf.strip())
+            buf = ""
+        elif len(buf) >= max_len:
+            out.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        out.append(buf.strip())
+
+    # 去掉纯标点的碎片，避免合成出奇怪的声音
+    out = [x for x in out if x and not re.fullmatch(r"[\s\W_]+", x)]
+    return out or [t]
+
+
+def _speak_stream(sentences):
+    """分句合成 + 边合边播。返回说明字符串（和 speak_text 的约定一致）。"""
+    import queue as _queue
+
+    q = _queue.Queue()
+
+    def _worker():
+        for i, s in enumerate(sentences):
+            try:
+                p = synth_to_file(s, tag="_s%d" % i)
+            except Exception as e:
+                log("流式合成第 %d 句失败: %s" % (i + 1, e))
+                p = None
+            q.put((i, p))
+        q.put(None)
+
+    th = _threading.Thread(target=_worker, daemon=True, name="tts-stream")
+    th.start()
+
+    played = 0
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        i, p = item
+        if not p:
+            continue
+        try:
+            play_wav(p)          # 阻塞：播这句的同时 worker 在合成下一句
+            played += 1
+        except Exception as e:
+            log("播放第 %d 句失败: %s" % (i + 1, e))
+    return "流式克隆(%d/%d句)" % (played, len(sentences))
 
 
 def _autofix_mic():
@@ -1146,6 +1237,12 @@ def speak_text(text):
             except Exception as e:
                 log("播原声失败: %s" % e)
     try:
+        # ★★ 2026-10-24【全双工 第 1 步】长回答走分句流式：
+        #   第 1 句合成完就播，后面边播边合，首字延迟从「整段合成」降到「一句」。
+        #   短回答（一句话）没切分收益，仍旧走整段，省一个线程。
+        _parts = _split_for_speech(text)
+        if len(_parts) > 1:
+            return _speak_stream(_parts)
         p = synth_to_file(text)
         if p:
             play_wav(p)

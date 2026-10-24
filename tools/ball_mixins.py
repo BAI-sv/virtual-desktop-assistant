@@ -10,6 +10,14 @@ Mixin 共享同一个 self，所以 self.canvas / self.frames / self.pos 这些
 
 from ball_consts import *
 
+# ★★ 2026-10-24【修·ImageDraw 未定义】
+#   L131 用了 ImageDraw.Draw(img) 画面板圆角，但这个模块自己不 import，
+#   bind_globals 的 _NEEDED 列表里也没它，于是每帧都刷
+#     「进度条渲染失败: name 'ImageDraw' is not defined」
+#   PIL 是硬依赖，直接在这里 import 最稳，不依赖注入。
+from PIL import Image, ImageChops, ImageDraw, ImageFont
+import numpy as np
+
 class WindowMixin:
     """WindowMixin（2026-10-23 从 FairyBall 拆出）"""
 
@@ -4380,6 +4388,7 @@ def bind_globals(g):
             "STRATA_UNLOAD_URL VOICE_INDEX WIN_H WIN_W _EDGE_PX "
             "_PANEL_FUSE_FILL _PANEL_RINSET _PANEL_RPAD "
             "_free_ram_gb _hw_color _panel_backing _panel_bar _pil_round _ptext "
+            "load_frames make_bubble _ball_backing "
             "_resolve_strata_dir _rnw _strata_cmd "
             "ctypes fairy_root fix_mojibake io json make_bubble os read_balance "
             "retail_bubble sys threading time tk urllib virtual_screen"
