@@ -1494,6 +1494,14 @@ class FairyBall(WindowMixin, InputMixin, BubbleMixin, StrataMixin, AiCfgMixin, V
         self._strata_says = []
         threading.Thread(target=self._strata_loop, daemon=True).start()
         self.idx = 0
+        # ★★ 2026-10-24【动画速度】用户反馈"晃得太快"。
+        #   122 帧 @33fps 时一轮只要 3.7 秒，对轻微起伏的待机动作来说太急。
+        #   这里控制每帧前进多少动画帧：
+        #     1.0  = 原速（3.7 秒一轮）
+        #     0.5  = 一半（7.4 秒一轮）
+        #     0.36 = 默认（约 10 秒一轮，接近呼吸节奏）
+        #   注意：只影响动画推进速度，重绘仍是 33fps，所以不会变卡。
+        self._anim_speed = 0.36
         self.spin = 0
         self.speaker = Speaker(enabled=("--mute" not in sys.argv))
         # ★ 开机播报预热：8 秒后（等 IndexTTS 引擎热起来）补合成固定句。
@@ -1555,6 +1563,14 @@ class FairyBall(WindowMixin, InputMixin, BubbleMixin, StrataMixin, AiCfgMixin, V
                   % (type(_e).__name__, _e), flush=True)
         # ---- 听歌识曲（Shazam 协议，指纹识别，常开后台线程）----
         # 常开：每 18 秒抓系统正在播放的声音识别一次，识别到新歌 -> 气泡。
+        # ★★ 2026-10-24【用户要求：听到什么歌就播报一下】
+        #   原来 _songrec_on 没有初始值，getattr(..., False) 默认 False，
+        #   于是 _songrec_loop 每 5 秒醒来一次、看到开关是关的又睡回去，
+        #   从头到尾一次都没识别过（日志里连一条记录都没有）。
+        #   现在默认打开：后台每 18 秒抓一次系统声音，识别到新歌就语音播报。
+        #   代价是定期录 8 秒系统声音；不想要就在球的右键菜单里点「听歌识曲」关掉，
+        #   关了循环立刻空转，不再录音。
+        self._songrec_on = True
         self._songrec_at = 0.0
         self._songrec_last = ""
         threading.Thread(target=self._songrec_loop, daemon=True).start()
@@ -1810,7 +1826,14 @@ class FairyBall(WindowMixin, InputMixin, BubbleMixin, StrataMixin, AiCfgMixin, V
                     pass
                 self.side = side
             base = (self.frames_bright if (running or not ok) else self.frames_dim)
-            ball = base[self.idx % len(base)]
+            # ★★ 2026-10-24【动画速度可调】用户说"晃得太快"。
+            #   原来 self.idx 每帧 +1，122 帧按 33fps 跑完只要 3.7 秒，
+            #   对这类"轻微起伏"的待机动作来说太快，看着像在抽筋。
+            #   现在 idx 用浮点累加、取帧时才取整，速度由 _anim_speed 控制：
+            #     1.0 = 原来那样（3.7 秒一轮）
+            #     0.36 ≈ 10 秒一轮（默认，接近呼吸感）
+            #   保持 33fps 重绘不变，所以不会卡顿，只是每帧前进得更少。
+            ball = base[int(self.idx) % len(base)]
             ball_x = 0 if self.side == "right" else BAR_W + GAP
             img = Image.new("RGBA", (WIN_W, WIN_H), (0, 0, 0, 0))
             # ★★【2026-10-10 球体实底】先铺【球体底下的深色圆盘】，再把球画在它【之上】。
@@ -1843,7 +1866,9 @@ class FairyBall(WindowMixin, InputMixin, BubbleMixin, StrataMixin, AiCfgMixin, V
                     # 进度条画失败【绝不能拖垮球体】：只记日志，球照常显示
                     print("[fairy] 进度条渲染失败（跳过该帧进度条）: %s" % _e_bar, flush=True)
             self.lw.blit(to_premultiplied_bgra(img))
-            self.idx += 1
+            # ★★ 2026-10-24【动画减速】原来是 self.idx += 1（3.7 秒一轮太快）。
+            #   改成浮点累加：每帧只前进 _anim_speed 帧，取帧时再 int()。
+            self.idx += float(getattr(self, "_anim_speed", 0.36))
             # ---- ★超时兜底"上电"（审计 P0：tick() 从未被调用 → 保险是死的）----
             # 【为什么必须做】万一 unduck() 失败，音乐会永久停在暂停态 / 音量永久卡在 20%。
             # 【为什么只 tick 已加载的】不在主线程触发模块加载 —— volume_duck 走进程内

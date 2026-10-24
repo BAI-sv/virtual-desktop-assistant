@@ -113,6 +113,19 @@ CFG = {
     "wake_reply": False,
     "dialogue": True,        # ★ 连续对话：唤醒后不关麦，继续听指令
     "dialogue_idle": 8.0,    # 对话模式里 8 秒没说话 -> 退回只等唤醒
+    # ★★ 2026-10-24【用户要求：喊完干等太傻，给一句轻提示】
+    #   原话「喊了 fairy 5秒没有后续，就说主人请吩咐，或者在呢，请说」
+    #   现在是静默唤醒（不播「我在」），所以喊完没动静会让人以为没醒。
+    #   唤醒后等 wake_hint_after 秒仍无人声，就播一句提示，只播一次。
+    #   设 0 可关闭。
+    "wake_hint_after": 5.0,
+    "wake_hints": ("在呢，请说", "主人请吩咐"),
+    # ★★ 2026-10-24【用户要求：Fairy 听到的话自动显示在 DSH 输入框里】
+    #   本地能直接执行的（打开/关闭软件、智能家居、自定义指令）照旧本地做；
+    #   本地都不认的话，就把它粘到 DSH 的输入框，由人确认后再发。
+    #   只粘贴不回车（语音听错一个字就发出去风险太大）。
+    #   设 False 可关闭，回到"本地大脑自己答"的老行为。
+    "forward_to_dsh": True,
     # ★ 2026-10-12【按键说话】按住按键说话、松开即识别并回复。
     #   key: 鼠标侧键 xbutton1(前进)/xbutton2(后退)；也可用键盘单键名(如 f2)
     #   alt_key: 键盘组合快捷键，如 ctrl+alt+v / ctrl+shift+f
@@ -1458,6 +1471,10 @@ def cmd_run(seconds=0):
         mode = "wake"            # wake = 只等唤醒词；dialogue = 连续对话
         last_voice = time.time()
         hold_until = 0.0         # ★ 自说自话保护：这段时间内不采集/不喂KWS
+        # ★★ 2026-10-24【唤醒后干等提示】用户要求：
+        #   「喊了 fairy 5秒没有后续，就说主人请吩咐，或者在呢，请说」
+        _wake_at = None          # 本次唤醒的时刻
+        _hint_done = False       # 本次唤醒是否已经提示过（只提示一次）
         mic_peak = 0.0           # ★ 这段时间内麦克风的最大幅度（用于判“麦克风有没有声音”）
         _sat_cnt = 0             # ★ 2026-10-12【削波自愈】连续“满格”窗口计数
         _sat_last_fix = 0.0      # 上次自动降麦克风音量的时间（10 分钟内不重复）
@@ -1571,11 +1588,15 @@ def cmd_run(seconds=0):
                     drain_input(st, hop, 1)
                     hold_until = time.time() + 0.15
                 kws_reset(engines)
+                # ★★ 2026-10-24【唤醒后干等提示】记下唤醒时刻，主循环里到点提醒
+                _wake_at = now
+                _hint_done = False
                 if CFG.get("dialogue", True):
                     mode = "dialogue"
                     last_voice = time.time()
-                    log("→ 进入连续对话（直接说指令即可，%.0f 秒没声自动退出）"
-                        % CFG["dialogue_idle"])
+                    log("→ 进入连续对话（直接说指令即可，%.0f 秒没声自动退出；"
+                        "%.0f 秒内没开口会提醒一句）"
+                        % (CFG["dialogue_idle"], CFG.get("wake_hint_after", 5.0)))
                 try:
                     json.dump({"listening": True, "device": dev["name"], "rate": rate,
                                "mode": mode, "wake_count": wake_count, "ask_count": ask_count,
@@ -1599,6 +1620,27 @@ def cmd_run(seconds=0):
                 buf = [a.copy()]
                 silent = 0.0
                 log("★ 按键说话：开始收集（松开结束）")
+            # ★★ 2026-10-24【唤醒后干等提示】
+            #   静默唤醒不播「我在」，喊完一直没动静会让人以为没醒。
+            #   唤醒后 wake_hint_after 秒内还没开口，就播一句「在呢，请说」。
+            #   每轮唤醒只提示一次；一开口（collecting=True）就不再提示。
+            if (mode == "dialogue" and not collecting and not _hint_done
+                    and _wake_at is not None
+                    and (now - _wake_at) >= CFG.get("wake_hint_after", 5.0)):
+                _hint_done = True
+                _hints = CFG.get("wake_hints") or ("在呢，请说",)
+                _hint = _hints[wake_count % len(_hints)]
+                log("唤醒后 %.0f 秒没开口 -> 提示「%s」" % (now - _wake_at, _hint))
+                try:
+                    _route_h = speak_text(_hint)
+                    log("已说出（%s）" % _route_h)
+                except Exception as _e_h:
+                    log("提示播报失败: %s" % _e_h)
+                # ★ 提示完把闲置计时也重置：否则 8 秒的对话窗口只剩 3 秒，
+                #   用户刚被提醒、还没来得及开口就被踢回待唤醒。
+                last_voice = time.time()
+                hold_until = time.time() + max(1.2, len(_hint) * 0.25)
+                continue
             need_ep = (mode == "dialogue" and CFG.get("dialogue", True)) or (not engines) or (mode == "ptt")
             if not need_ep:
                 # KWS 在岗、且没在对话 -> 这一块已经被 KWS 吃掉，不做别的
@@ -1849,6 +1891,24 @@ def cmd_run(seconds=0):
                             continue
                 except Exception as _e:
                     log("语音关软件异常: %s" % _e)
+                # ★★ 2026-10-24【用户要求：Fairy 听到的话自动显示在 DSH 输入框里】
+                #   放在这里而不是最前面：前面那些是"打开/关闭软件、智能家居、
+                #   自定义指令"这类【本机能直接执行】的话，做了更有用；
+                #   只有落到这一步（本地谁都不认）才转给 DSH，
+                #   让人在输入框里看一眼、确认后再发。
+                #   好处：说「打开原神」仍然直接开游戏，说「帮我看看这段报错」
+                #   才进 DSH，两边不打架。
+                if CFG.get("forward_to_dsh", True):
+                    try:
+                        import voice_to_input as _vti
+                        _ok_f, _msg_f = _vti.paste(txt, press_enter=False)
+                        log("→ 转发到 DSH 输入框：%s" % _msg_f)
+                        if _ok_f:
+                            # 不播报（人已经能在输入框里看见），直接收尾
+                            hold_until = time.time() + 0.4
+                            continue
+                    except Exception as _e_f:
+                        log("转发到 DSH 失败（改走本地大脑）: %s" % _e_f)
                 try:
                     reply = ask_brain(txt, history=_HIST)
                 except Exception as e:

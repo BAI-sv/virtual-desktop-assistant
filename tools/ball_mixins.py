@@ -1641,15 +1641,28 @@ class InputMixin:
         self._drag = None
 
     def _on_hover_in(self, e=None):
-        """★ 2026-10-12【悬停提示卡已删除】按用户要求不再弹出左侧状态卡。
+        """★★ 2026-10-24【用户要求：鼠标悬停就显示信息面板】
 
-        ★ 2026-10-19【① 空闲自动隐藏】但要记一个"鼠标在球上"的标志，
-        _tick 里据此决定要不要自动展开右侧面板 —— 鼠标移上去就给你看数据。
+        原话「把这球和下面的框都删除 功能放在桌面的球上鼠标悬停上」——
+        网页那套球和状态框已经关掉了，信息改在这里看。
+
+        【怎么做的】不新画面板，直接复用 _panel_peek_until：
+        _tick 里是 `_show = running or _tmp or (now < _panel_peek_until)`，
+        所以把它推到一个很远的时刻，就等于「一直显示到鼠标移开」。
+        移开时清 0，tick 立刻收起来。
         """
         self._hovering = True
+        import time as _t
+        self._panel_peek_until = _t.time() + 999999.0
+        try:
+            self._tick()      # 立刻画一帧，别等下一个 33fps 周期
+        except Exception:
+            pass
 
     def _on_hover_out(self, e=None):
         self._hovering = False
+        # ★ 2026-10-24：移开就收面板（清掉悬停时推远的截止时刻）
+        self._panel_peek_until = 0.0
         w = getattr(self, "_hover", None)
         if w is not None:
             try:
@@ -1657,6 +1670,10 @@ class InputMixin:
             except Exception:
                 pass
             self._hover = None
+        try:
+            self._tick()
+        except Exception:
+            pass
 
     def _peek_panel(self, seconds=10.0):
         """★ 2026-10-19【用户要求】左键单击 = 临时看悬浮窗 10 秒。
@@ -3125,11 +3142,23 @@ class SongRecMixin:
         if not sig.strip("|") or sig == self._songrec_last:
             return
         self._songrec_last = sig
-        _t = "识别到：《%s》 - %s" % (fix_mojibake(r.get("title") or "?"),
-                                   fix_mojibake(r.get("artist") or "?"))   # ★ 乱码自愈
+        _title = fix_mojibake(r.get("title") or "?")
+        _artist = fix_mojibake(r.get("artist") or "?")
+        _t = "识别到：《%s》 - %s" % (_title, _artist)
         if r.get("link"):
             _t += "\n" + r["link"]
         self._wg_bubbles.append(_t)
+        # ★★ 2026-10-24【用户要求：识别到就播报一下】
+        #   原来这里只把结果塞进气泡队列（文字），一句都不念，
+        #   所以"听到歌了"这件事只有你恰好看着球才知道。
+        #   现在用语音念出来：只念歌名和歌手，不念链接（URL 念出来没法听）。
+        try:
+            _say = "现在放的是《%s》" % _title
+            if _artist and _artist != "?":
+                _say += "，%s" % _artist
+            self.say(_say, "doing")
+        except Exception as _e_say:
+            print("[fairy] 识曲播报失败: %s" % _e_say, flush=True)
 
 
 class ServiceMixin:
