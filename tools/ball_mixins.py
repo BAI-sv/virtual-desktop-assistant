@@ -1787,6 +1787,26 @@ class BubbleMixin:
         except Exception:
             pass
 
+    # 这些工具名说明正在查资料 -> 播「正在搜索相关信息」，其余一律「正在思考问题」
+    _SEARCH_TOOL_KEYS = (
+        "search", "fetch", "web", "browse", "google", "bing",
+        "http", "url", "curl", "grep", "glob", "read", "ls",
+    )
+
+    def _thinking_phrase(self, tool):
+        """★ 2026-10-24【用户要求】思考中只播这两句之一。
+
+        原话：「在思考时，只直接播报正在思考问题，或者正在搜索相关信息，
+               思考完毕出现完整结果才进行结果全语音作答」
+
+        判断依据是当前正在跑的工具名：命中搜索/读取类关键词就说"正在搜索相关信息"，
+        否则（推理、写代码、改文件……）说"正在思考问题"。
+        """
+        t = (tool or "").lower()
+        if t and any(k in t for k in self._SEARCH_TOOL_KEYS):
+            return "正在搜索相关信息"
+        return "正在思考问题"
+
     def _on_state(self, kind, text):
         """状态回调。
 
@@ -1817,11 +1837,20 @@ class BubbleMixin:
                         tool = self.state.last_tool
                 except Exception:
                     pass
-                # ★ 从"池"里随机抽一句（不再是固定映射那一句）
-                self.speaker.say(self.speaker._pick_doing_line(tool))
+                # ★★ 2026-10-24【用户要求：思考中只播这两句】
+                #   原话：「在思考时，只直接播报正在思考问题，或者正在搜索相关信息，
+                #           思考完毕出现完整结果才进行结果全语音作答」
+                #   所以这里不再用游戏原声池随机抽，改成明确的两句话；
+                #   全文播报交给 State._pending_answer（等这一轮跑完才念）。
+                #   同一句话连续不重复播，避免一轮里反复念叨。
+                _phrase = self._thinking_phrase(tool)
+                if _phrase != getattr(self, "_last_doing_phrase", None):
+                    self._last_doing_phrase = _phrase
+                    self.speaker.say(_phrase)
             elif kind == "done":
                 self.speaker.say(SPEAK_DONE)
                 self._was_running = False
+                self._last_doing_phrase = None      # ★ 下一轮可以重新播进度
                 # ★ 同 #2：入队 -> 主线程弹（原来 self.after(0, ...) 是 Tk 跨线程调用）
                 self._adv_bubbles.append("主人，我已完成既定目标。")
             elif kind == "answer":

@@ -105,6 +105,12 @@ CFG = {
                              #   门限 0.006 时 int(6)，用户说话 int(4.75)=4 → 永远过不去；
                              #   门限 0.0008 时 int(0.8)=0，连静音 int(0.04)=0 都通过。取整 bug。
     "cooldown": 2.0,         # 应答后的冷却（原 6.0，太久了）
+    # ★★ 2026-10-24【用户要求：不用每次都回答】
+    #   原话「不用每次都回答，并且唤醒词 fairy 可以打断当前播报和对话」
+    #   False = 喊一声就直接进入听取状态，不播「我在」这类应答
+    #          （球的界面有视觉反馈，不会让人不知道醒没醒）
+    #   True  = 恢复原来每次都应答
+    "wake_reply": False,
     "dialogue": True,        # ★ 连续对话：唤醒后不关麦，继续听指令
     "dialogue_idle": 8.0,    # 对话模式里 8 秒没说话 -> 退回只等唤醒
     # ★ 2026-10-12【按键说话】按住按键说话、松开即识别并回复。
@@ -446,6 +452,35 @@ def play_wav(path):
     except Exception as e:
         log("播应答失败: %s" % e)
         _SPEAKING = False
+        return False
+
+
+def prewarm_output():
+    """★ 2026-10-24【预热音频输出流 —— 把唤醒应答的 3 秒延迟压到 0.2 秒】
+
+    实测（蓝牙耳机 SANSUI W68）：
+        第1次 play_wav: 2.77 秒    ← 首次要协商蓝牙通道
+        第2次 play_wav: 0.21 秒    ← 之后就快了
+        第3次 play_wav: 0.21 秒
+
+    唤醒应答走的正是 play_wav，所以用户喊完要干等 3 秒才听到「我在」。
+    启动时先播一段 0.1 秒静音把输出流开起来，唤醒时就走快路径。
+    失败不影响任何功能（只是回到原来慢一点的状态）。
+    """
+    global _SPEAKING
+    try:
+        import numpy as np
+        import sounddevice as sd
+        _was = _SPEAKING
+        sd.stop()
+        _SPEAKING = True
+        sd.play(np.zeros(1600, dtype=np.float32), 16000, blocking=True)
+        _SPEAKING = _was
+        log("音频输出流已预热（唤醒应答不再等蓝牙开流）")
+        return True
+    except Exception as e:
+        _SPEAKING = False
+        log("预热音频输出流失败（不影响使用，只是首次应答会慢一点）: %s" % e)
         return False
 
 
@@ -1376,6 +1411,16 @@ def cmd_run(seconds=0):
         atexit.register(_cleanup_pa)
 
         log("耳朵已开（喊「Fairy」试试；--stop 停止）")
+        # ★★ 2026-10-24【预热音频输出流】
+        #   蓝牙耳机首次播放要 2.7 秒协商通道，后续只要 0.2 秒。
+        #   唤醒应答走 play_wav，所以这里先把流开起来，喊完能立刻听到「我在」。
+        #   放后台线程，不挡启动。
+        try:
+            _th_prewarm = __import__("threading").Thread(
+                target=prewarm_output, daemon=True, name="prewarm-out")
+            _th_prewarm.start()
+        except Exception:
+            pass
         # ★★ 2026-10-18【用户要求"启动只播天气和穿衣"】这里原来会念一句
         #   「Fairy 已就绪」—— 那是启动时第二处语音，与 briefing 的天气/穿衣重复。
         #   默认不播；要恢复就在 fairy.json 顶层写 "ear_announce_ready": true。
@@ -1497,15 +1542,35 @@ def cmd_run(seconds=0):
                         log("KWS 命中但冷却中（间隔 %.1fs < %.1fs）-> 忽略"
                             % (gap, CFG["cooldown"]))
             if woke:
-                stop_current_play()   # ★ 2026-10-12：唤醒即打断任何播报（含球端启动播报）
-                last_idx = pick_answer(logic, ANSWER_POOL, last_idx)
-                say = ANSWER_POOL[last_idx % len(ANSWER_POOL)]
-                route = speak_text(say)
-                log("唤醒 #%d 应答「%s」（%s）" % (wake_count, say, route))
-                # speak_text 是阻塞的（播完才返回）：说完先洗掉旧块
-                drain_input(st, hop, 4)
+                # ★ 2026-10-12：唤醒即打断任何播报（含球端启动播报）
+                # ★★ 2026-10-24【用户要求：唤醒词可以打断当前播报和对话】
+                #   这里无条件先停：正在念的回答、正在进行的上一轮对话，全部让位。
+                _was_speaking = _SPEAKING or (mode == "dialogue")
+                stop_current_play()
+                if _was_speaking:
+                    log("★ 唤醒词打断（播报中/对话中）-> 已让位，重新听指令")
+                collecting = False
+                buf = []
+                silent = 0.0
+
+                # ★★ 2026-10-24【用户要求：不用每次都回答】
+                #   wake_reply=False 时不播「我在」，直接进入听取状态。
+                if CFG.get("wake_reply", False):
+                    last_idx = pick_answer(logic, ANSWER_POOL, last_idx)
+                    say = ANSWER_POOL[last_idx % len(ANSWER_POOL)]
+                    route = speak_text(say)
+                    log("唤醒 #%d 应答「%s」（%s）" % (wake_count, say, route))
+                    # speak_text 是阻塞的（播完才返回）：说完先洗掉旧块
+                    drain_input(st, hop, 4)
+                    hold_until = time.time() + 1.0
+                else:
+                    route = "静默"
+                    log("唤醒 #%d -> 静默进入听取（不播应答；"
+                        "要恢复在 fairy.json 的 ear.wake_reply 写 true）" % wake_count)
+                    # 静默时给一点点过渡，让 AGC/底噪跟上，不吞掉用户第一个字
+                    drain_input(st, hop, 1)
+                    hold_until = time.time() + 0.15
                 kws_reset(engines)
-                hold_until = time.time() + 1.0
                 if CFG.get("dialogue", True):
                     mode = "dialogue"
                     last_voice = time.time()
@@ -1709,6 +1774,30 @@ def cmd_run(seconds=0):
                             continue
                 except Exception:
                     pass
+                # ★★ 2026-10-24【修：说「打开谷歌」被判成智能家居，结果什么都不做】
+                #   原来顺序是「先智能家居、后开软件」，而 smart_home.control()
+                #   对「打开X」几乎照单全收，把「打开谷歌」也当成家居目标返回了，
+                #   于是走进智能家居分支——可那边没启用，用户等来的是沉默。
+                #   实测日志：指令「打开谷歌。」-> 智能家居控制 -> 未启用（连说三遍）。
+                #   现在改成先试「开软件/开网址」：能打开就直接干活；
+                #   打不开（返回"没有找到"）再落到智能家居判断，
+                #   所以「打开灯」这类仍然走家居，不会误抢。
+                try:
+                    import re as _re_p
+                    _mp = _re_p.search(r"(打开|启动|运行|开启)\s*([\u4e00-\u9fa5a-zA-Z0-9]{2,20})", txt)
+                    if _mp:
+                        _tp = _mp.group(2).strip()
+                        import fairy_apps as _fa_p
+                        _rp = _fa_p.open_smart(_tp)
+                        if not _rp.startswith("没有找到"):
+                            log("语音打开软件(优先)：%s -> %s" % (_tp, _rp[:60]))
+                            _HIST.append((txt, _rp))
+                            route = speak_text(_rp)
+                            log("已说出（%s）" % route)
+                            hold_until = time.time() + 1.8
+                            continue
+                except Exception as _e_p:
+                    log("语音开软件(优先)异常: %s" % _e_p)
                 # ★ 2026-10-12【智能家居控制】"打开灯/关空调/调亮" -> smart_home 桥
                 #   命中家居目标（灯/空调/窗帘/插座/扫地机等）就走控制；
                 #   不是家居目标返回 None，继续走下面的开/关软件路由。

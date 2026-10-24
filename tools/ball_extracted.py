@@ -546,6 +546,15 @@ class State:
         # None = 还没建立基线 —— 首次只记基线不补念，
         # 否则球一重启就会把上一次的旧回复念一遍。
         self.reply_seq = None
+        # ★★ 2026-10-24【用户要求：思考中只播进度，结果出来才全文念】
+        #   原来 rseq 一前进就立刻 on_change("answer", ...) 全文播报，
+        #   于是「我看看」「查到了」这类中间过渡语也会被念出来。
+        #   现在改成：新回复先存进 _pending_answer，等 running 变 False
+        #   （这一轮干完）并且稳定 1.2 秒没有更新的文本，才真正念。
+        #   _spoken_answer_seq 防止同一条被念两遍。
+        self._pending_answer = None     # (seq, text) 暂存待念
+        self._answer_due = 0.0          # 暂存后多久才允许念（秒）
+        self._spoken_answer_seq = 0     # 已经念到哪个 seq
         self.lock = threading.Lock()
 
     def poll_loop(self, stop):
@@ -617,8 +626,12 @@ class State:
                         if rtxt:
                             if rp.get("truncated"):
                                 rtxt = rtxt + "……后面还有内容，要看请到界面。"
-                            if self.on_change:
-                                self.on_change("answer", rtxt)
+                            # ★★ 2026-10-24【只暂存，不立刻念】
+                            #   思考/搜索过程中的过渡语也会推到这里，
+                            #   立刻念就会把「我看看」「查到了」念出来。
+                            #   先存着，等这一轮跑完再统一念最终结果。
+                            self._pending_answer = (rseq, rtxt)
+                            self._answer_due = time.time() + 1.2
                     self._reply_err = None             # 成功 -> 清掉错误记忆
                 except Exception as e:
                     msg = str(e)
@@ -633,6 +646,25 @@ class State:
                                   "在此之前球不会念助手回复（其余功能不受影响）。" % msg, flush=True)
                         else:
                             print("[fairy] 拉取助手回复失败: %s" % msg, flush=True)
+
+                # ---- ★★ 2026-10-24【什么时候才把结果念出来】----
+                #   条件三条同时满足：
+                #     1) 手上有暂存的回答
+                #     2) 这一轮已经跑完（running 不是 True）
+                #     3) 距最后一次更新过了 1.2 秒（给最终文本留出覆盖窗口）
+                #   这样思考/搜索过程只会播「正在思考问题」这类进度，
+                #   用户听到全文时，听到的已经是最终结果。
+                try:
+                    _pend = self._pending_answer
+                    if _pend and self.running is not True and time.time() >= self._answer_due:
+                        self._pending_answer = None
+                        _seq, _txt = _pend
+                        if _seq > self._spoken_answer_seq:
+                            self._spoken_answer_seq = _seq
+                            if self.on_change:
+                                self.on_change("answer", _txt)
+                except Exception as _e:
+                    print("[fairy] 播报最终结果失败: %s" % _e, flush=True)
             except Exception:
                 with self.lock:
                     self.ok = False

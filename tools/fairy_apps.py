@@ -832,13 +832,23 @@ def open_smart(text):
             except Exception:
                 continue
     # 级 0.2：智能家居控制（打开灯/空调/窗帘/扫地机等 -> smart_home 桥）
-    try:
-        import smart_home
-        _sr = smart_home.control(text)
-        if _sr:
-            return _sr
-    except Exception:
-        pass
+    # ★★ 2026-10-24【修：语音打不开任何软件，全被智能家居吃掉】
+    #   原来这里【无条件】调 smart_home.control(text)，而它在未启用时
+    #   也会返回一句"智能家居未启用…"（非 None），于是 `if _sr: return _sr`
+    #   立刻短路，后面所有级（语音库 / 知识库 / 开始菜单 / 注册表 / Everything）
+    #   根本没机会跑。实测：open_smart('记事本') 和 open_smart('谷歌')
+    #   都只回了"智能家居未启用" —— 用户听到的是一句废话，软件没打开。
+    #   现在只有目标确实是家电时才进这个分支。
+    _SMART_WORDS = ("灯", "空调", "窗帘", "插座", "扫地", "风扇", "净化器",
+                    "热水器", "加湿器", "取暖器", "电暖")
+    if any(_w in text for _w in _SMART_WORDS):
+        try:
+            import smart_home
+            _sr = smart_home.control(text)
+            if _sr:
+                return _sr
+        except Exception:
+            pass
     # 级 0.5：中文语音软件库（扫描后保存，本机已装，路径精确）
     for _nm, _info in load_voice_lib().items():
         if (t in _nm.lower()
